@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -7,6 +8,8 @@ const { Auth } = require("msmc");
 
 const VERSION_MANIFEST_URL =
   "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+const LAUNCHER_NAME = "Nexus MC Launcher";
+const LAUNCHER_VERSION = "0.1.0";
 
 let mainWindow;
 let busy = false;
@@ -47,6 +50,10 @@ function minecraftRoot() {
   return path.join(app.getPath("appData"), ".minecraft");
 }
 
+function versionDirectory(id) {
+  return path.join(minecraftRoot(), "versions", id);
+}
+
 function ensureParent(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
@@ -74,7 +81,9 @@ function defaultSettings() {
   return {
     maxMemory: "4G",
     minMemory: "1G",
+    logFontSize: 12,
     javaPath: "",
+    java8Path: "",
     windowWidth: 1280,
     windowHeight: 720,
     showSnapshots: true,
@@ -100,7 +109,9 @@ function saveSettings(input) {
     ...loadSettings(),
     maxMemory: normalizeMemory(input.maxMemory, "4G"),
     minMemory: normalizeMemory(input.minMemory, "1G"),
+    logFontSize: clampNumber(input.logFontSize, 8, 36, 12),
     javaPath: typeof input.javaPath === "string" ? input.javaPath.trim() : "",
+    java8Path: typeof input.java8Path === "string" ? input.java8Path.trim() : "",
     windowWidth: clampNumber(input.windowWidth, 854, 3840, 1280),
     windowHeight: clampNumber(input.windowHeight, 480, 2160, 720),
     showSnapshots: Boolean(input.showSnapshots),
@@ -156,14 +167,150 @@ function bundledJavaPath(component) {
   return candidates.find((candidate) => fs.existsSync(candidate)) || "";
 }
 
+function walkForJavaExecutables(directory, maxDepth = 4, results = []) {
+  if (!directory || maxDepth < 0) return results;
+
+  for (const entry of safeReadDirectory(directory)) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isFile() && /^javaw?\.exe$/i.test(entry.name)) {
+      results.push(fullPath);
+      continue;
+    }
+
+    if (entry.isDirectory()) {
+      walkForJavaExecutables(fullPath, maxDepth - 1, results);
+    }
+  }
+
+  return results;
+}
+
+function commonJavaSearchRoots() {
+  const roots = [
+    path.join(minecraftRoot(), "runtime"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Java"),
+    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Java"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Eclipse Adoptium"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Microsoft"),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Zulu"),
+    path.join(
+      process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)",
+      "Minecraft Launcher",
+      "runtime"
+    ),
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Minecraft Launcher", "runtime"),
+  ];
+
+  return [...new Set(roots.filter((value) => value && fs.existsSync(value)))];
+}
+
+function javaVersionInfo(javaPath) {
+  const result = spawnSync(javaPath, ["-version"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+  return parseJavaVersionOutput(output);
+}
+
+function parseJavaVersionOutput(output) {
+  const text = String(output || "");
+  const match = text.match(/version\s+"([^"]+)"/i) || text.match(/openjdk\s+version\s+"([^"]+)"/i);
+  const versionText = match ? match[1] : "";
+  if (!versionText) return null;
+
+  let major = null;
+  if (versionText.startsWith("1.")) {
+    major = Number.parseInt(versionText.split(".")[1], 10);
+  } else {
+    major = Number.parseInt(versionText.split(/[.+-]/)[0], 10);
+  }
+
+  if (Number.isNaN(major)) return null;
+  return { major, versionText };
+}
+
+function discoveredJavaCandidates() {
+  const candidates = [];
+  const preferredLegacy = [
+    path.join(minecraftRoot(), "runtime", "jre-legacy", "windows", "jre-legacy", "bin", "javaw.exe"),
+    path.join(minecraftRoot(), "runtime", "jre-legacy", "windows", "jre-legacy", "bin", "java.exe"),
+  ];
+
+  for (const candidate of preferredLegacy) {
+    if (fs.existsSync(candidate)) candidates.push(candidate);
+  }
+
+  for (const root of commonJavaSearchRoots()) {
+    candidates.push(...walkForJavaExecutables(root));
+  }
+
+  return [...new Set(candidates.filter((value) => value && fs.existsSync(value)))];
+}
+
+function autoDetectJavaPath(version) {
+  const candidates = discoveredJavaCandidates();
+  if (!candidates.length) return undefined;
+
+  const preferredMajor = isLegacyJavaNeeded(version) ? 8 : null;
+  const inspected = candidates
+    .map((candidate) => ({ path: candidate, info: javaVersionInfo(candidate) }))
+    .filter((candidate) => candidate.info);
+
+  if (preferredMajor !== null) {
+    const preferred = inspected.find((candidate) => candidate.info.major === preferredMajor);
+    if (preferred) return preferred.path;
+  }
+
+  const bundledComponent = version.javaVersion?.component;
+  if (bundledComponent) {
+    const bundled = bundledJavaPath(bundledComponent);
+    if (bundled) return bundled;
+  }
+
+  return undefined;
+}
+
 function resolveJavaPath(version, settings) {
+  // User-specified java path takes precedence
   if (settings.javaPath) return settings.javaPath;
+
+  // Optional explicit Java 8 override still works, but auto-detection is preferred.
+  if (isLegacyJavaNeeded(version) && settings.java8Path) return settings.java8Path;
+
+  const autoDetected = autoDetectJavaPath(version);
+  if (autoDetected) return autoDetected;
 
   const component = version.javaVersion?.component;
   const javaPath = bundledJavaPath(component);
   if (javaPath) return javaPath;
 
   return undefined;
+}
+
+function isLegacyJavaNeeded(version) {
+  // Heuristic: Minecraft 1.x where minor <= 8 often requires Java 8 (LaunchWrapper/Forge era)
+  try {
+    const candidate = version.launchNumber || version.inheritsFrom || version.id || "";
+    const match = minecraftVersionFromText(candidate);
+    if (match && match.startsWith("1.")) {
+      const parts = match.split(".");
+      const minor = Number.parseInt(parts[1], 10);
+      if (!Number.isNaN(minor) && minor <= 8) return true;
+    }
+
+    if (version.launchJsonPath && fs.existsSync(version.launchJsonPath)) {
+      const json = readJson(version.launchJsonPath, null);
+      if (json && typeof json.mainClass === "string") {
+        const mc = json.mainClass.toLowerCase();
+        if (mc.includes("launchwrapper") || mc.includes("fml") || mc.includes("forge")) return true;
+      }
+    }
+  } catch (_e) {
+    // fallthrough
+  }
+  return false;
 }
 
 function publicAccount(account = loadAccount()) {
@@ -309,7 +456,7 @@ async function getMinecraftSession() {
 }
 
 function isVersionInstalled(id) {
-  const folder = path.join(minecraftRoot(), "versions", id);
+  const folder = versionDirectory(id);
   return (
     fs.existsSync(path.join(folder, `${id}.json`)) &&
     fs.existsSync(path.join(folder, `${id}.jar`))
@@ -317,11 +464,52 @@ function isVersionInstalled(id) {
 }
 
 function getLocalVersionJsonPath(id) {
-  return path.join(minecraftRoot(), "versions", id, `${id}.json`);
+  return path.join(versionDirectory(id), `${id}.json`);
 }
 
 function getLocalVersionJarPath(id) {
-  return path.join(minecraftRoot(), "versions", id, `${id}.jar`);
+  return path.join(versionDirectory(id), `${id}.jar`);
+}
+
+function safeReadDirectory(directory) {
+  try {
+    if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
+      return [];
+    }
+    return fs.readdirSync(directory, { withFileTypes: true });
+  } catch (_error) {
+    return [];
+  }
+}
+
+function versionDirectoryJars(id) {
+  const directory = versionDirectory(id);
+  return safeReadDirectory(directory)
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".jar"))
+    .map((entry) => path.join(directory, entry.name))
+    .sort((left, right) => path.basename(left).localeCompare(path.basename(right)));
+}
+
+function isLauncherInstallerJar(filePath) {
+  const name = path.basename(filePath).toLowerCase();
+  return /(?:^|[-_. ])installer(?:[-_. ]|$)/.test(name);
+}
+
+function findLocalVersionJar(id) {
+  const exact = getLocalVersionJarPath(id);
+  if (fs.existsSync(exact) && !isLauncherInstallerJar(exact)) return exact;
+
+  const jars = versionDirectoryJars(id).filter(
+    (filePath) => !isLauncherInstallerJar(filePath)
+  );
+  if (!jars.length) return null;
+
+  const normalizedId = id.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const matching = jars.find((filePath) =>
+    path.basename(filePath, ".jar").toLowerCase().replace(/[^a-z0-9]+/g, "") ===
+    normalizedId
+  );
+  return matching || jars[0];
 }
 
 function localVersionFromDirectory(entry) {
@@ -329,12 +517,12 @@ function localVersionFromDirectory(entry) {
 
   const id = entry.name;
   const versionJsonPath = getLocalVersionJsonPath(id);
-  const versionJarPath = getLocalVersionJarPath(id);
+  const versionJarPath = findLocalVersionJar(id);
   const versionJson = readJson(versionJsonPath, null);
 
-  if (!versionJson && !fs.existsSync(versionJarPath)) return null;
+  if (!versionJson && !versionJarPath) return null;
 
-  const stats = fs.statSync(path.join(minecraftRoot(), "versions", id));
+  const stats = fs.statSync(versionDirectory(id));
   return {
     id,
     type: versionJson?.type || (versionJson?.inheritsFrom ? "custom" : "local"),
@@ -348,8 +536,37 @@ function localVersionFromDirectory(entry) {
   };
 }
 
+function normalizeDownloadUrl(url) {
+  if (typeof url !== "string") return url;
+  return url.replace(
+    /^http:\/\/files\.minecraftforge\.net\/maven\/?/i,
+    "https://maven.minecraftforge.net/"
+  );
+}
+
+function artifactPathFromUrl(url) {
+  if (typeof url !== "string") return "";
+
+  try {
+    const parsed = new URL(url);
+    const pathName = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+    const mavenIndex = pathName.toLowerCase().indexOf("maven/");
+    return mavenIndex >= 0
+      ? pathName.slice(mavenIndex + "maven/".length)
+      : pathName;
+  } catch (_error) {
+    const clean = url.split("?")[0].replace(/\\/g, "/");
+    const mavenIndex = clean.toLowerCase().indexOf("/maven/");
+    return mavenIndex >= 0
+      ? clean.slice(mavenIndex + "/maven/".length)
+      : clean.split("/").filter(Boolean).pop() || "";
+  }
+}
+
 function normalizeLibraryShape(library) {
   if (!library || typeof library !== "object") return library;
+
+  if (library.url) library.url = normalizeDownloadUrl(library.url);
 
   if (library.artifact && !library.downloads?.artifact) {
     library.downloads = {
@@ -381,7 +598,268 @@ function normalizeLibraryShape(library) {
     };
   }
 
+  if (library.downloads?.artifact?.url) {
+    library.downloads.artifact.url = normalizeDownloadUrl(
+      library.downloads.artifact.url
+    );
+  }
+
+  if (library.exact_url) {
+    const artifact = {
+      ...(library.downloads?.artifact || {}),
+      path:
+        library.downloads?.artifact?.path ||
+        library.artifact?.path ||
+        artifactPathFromUrl(library.exact_url),
+      url: normalizeDownloadUrl(library.exact_url),
+    };
+    library.downloads = {
+      ...(library.downloads || {}),
+      artifact,
+    };
+  }
+
+  if (library.downloads?.artifact?.url) {
+    delete library.url;
+  }
+
   return library;
+}
+
+function parseMavenName(name) {
+  const parts = String(name || "").split(":");
+  if (parts.length < 3) return null;
+  return {
+    group: parts[0],
+    artifact: parts[1],
+    version: parts[2],
+    classifier: parts[3] || "",
+  };
+}
+
+function libraryArtifactPath(library) {
+  if (isNativeOnlyLibrary(library)) {
+    return null;
+  }
+
+  const artifact = library?.downloads?.artifact || library?.artifact || null;
+  if (artifact?.path) {
+    return path.join(
+      minecraftRoot(),
+      "libraries",
+      ...String(artifact.path).split(/[\\/]+/)
+    );
+  }
+
+  const parsed = parseMavenName(library?.name);
+  if (!parsed) return null;
+
+  const fileName = `${parsed.artifact}-${parsed.version}${
+    parsed.classifier ? `-${parsed.classifier}` : ""
+  }.jar`;
+  return path.join(
+    minecraftRoot(),
+    "libraries",
+    ...parsed.group.split("."),
+    parsed.artifact,
+    parsed.version,
+    fileName
+  );
+}
+
+function hasExplicitArtifact(library) {
+  return Boolean(
+    library?.downloads?.artifact || library?.artifact || library?.exact_url
+  );
+}
+
+function isNativeOnlyLibrary(library) {
+  return (
+    !hasExplicitArtifact(library) &&
+    Boolean(library?.natives || library?.downloads?.classifiers)
+  );
+}
+
+function localAdditionalMetadataPath(id) {
+  return path.join(versionDirectory(id), "TLauncherAdditional.json");
+}
+
+function localAdditionalLibraries(id) {
+  const metadata = readJson(localAdditionalMetadataPath(id), null);
+  if (!Array.isArray(metadata?.modsLibraries)) return [];
+
+  return metadata.modsLibraries
+    .map((library) => normalizeVersionShape(cloneJson(library)))
+    .filter(Boolean);
+}
+
+function libraryRuleBlocked(library) {
+  if (!Array.isArray(library?.rules) || library.rules.length === 0) {
+    return false;
+  }
+
+  if (library.rules.length > 1) {
+    if (
+      library.rules[0].action === "allow" &&
+      library.rules[1].action === "disallow" &&
+      library.rules[1].os?.name === "osx"
+    ) {
+      return currentMinecraftOs() === "osx";
+    }
+    return true;
+  }
+
+  const [rule] = library.rules;
+  return rule.action === "allow" && rule.os ? rule.os.name !== currentMinecraftOs() : false;
+}
+
+function libraryDownloadUrl(library) {
+  const candidates = libraryDownloadCandidates(library);
+  return candidates[0] || null;
+}
+
+function libraryDownloadCandidates(library) {
+  if (isNativeOnlyLibrary(library)) {
+    return [];
+  }
+
+  if (library?.downloads?.artifact?.url) {
+    return [normalizeDownloadUrl(library.downloads.artifact.url)];
+  }
+
+  if (library?.artifact?.url) {
+    return [normalizeDownloadUrl(library.artifact.url)];
+  }
+
+  if (library?.exact_url) {
+    return [normalizeDownloadUrl(library.exact_url)];
+  }
+
+  const parsed = parseMavenName(library?.name);
+  if (!parsed) return [];
+
+  const fileName = `${parsed.artifact}-${parsed.version}${
+    parsed.classifier ? `-${parsed.classifier}` : ""
+  }.jar`;
+
+  const relativePath = `${parsed.group.replace(/\./g, "/")}/${parsed.artifact}/${parsed.version}/${fileName}`;
+  const bases = [];
+
+  if (library?.url) {
+    bases.push(library.url);
+  }
+
+  bases.push(
+    "https://libraries.minecraft.net/",
+    "https://repo.maven.apache.org/maven2/",
+    "https://search.maven.org/remotecontent?filepath=",
+    "https://maven.minecraftforge.net/"
+  );
+
+  const urls = [];
+  for (const base of bases.filter(Boolean)) {
+    if (base.includes("remotecontent?filepath=")) {
+      urls.push(`${base}${relativePath}`);
+      continue;
+    }
+    urls.push(normalizeDownloadUrl(`${base}${relativePath}`));
+  }
+
+  return [...new Set(urls)];
+}
+
+function versionLaunchLibraries(versionJson, id) {
+  return uniqueLibraries([
+    ...(Array.isArray(versionJson?.libraries) ? versionJson.libraries : []),
+    ...localAdditionalLibraries(id),
+  ]);
+}
+
+async function ensureLocalLaunchLibraries(id, versionJson) {
+  for (const library of versionLaunchLibraries(versionJson, id)) {
+    if (!library || libraryRuleBlocked(library)) continue;
+
+    const artifactPath = libraryArtifactPath(library);
+    if (!artifactPath || fs.existsSync(artifactPath)) continue;
+
+    const downloadCandidates = libraryDownloadCandidates(library);
+    if (!downloadCandidates.length) continue;
+
+    sendEvent("debug", `Baixando biblioteca local ausente: ${library.name}`);
+
+    let lastError = null;
+    let downloaded = false;
+    for (const downloadUrl of downloadCandidates) {
+      try {
+        await downloadFile(
+          downloadUrl,
+          artifactPath,
+          "classes-custom",
+          `Biblioteca ${library.name}`
+        );
+        downloaded = true;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (!downloaded && lastError) {
+      throw lastError;
+    }
+  }
+}
+
+function resolveLaunchClassPaths(versionJson, id) {
+  return versionLaunchLibraries(versionJson, id)
+    .filter((library) => !libraryRuleBlocked(library))
+    .map((library) => libraryArtifactPath(library))
+    .filter((filePath) => filePath && fs.existsSync(filePath));
+}
+
+function isForgeLibrary(library) {
+  const parsed = parseMavenName(library?.name);
+  return (
+    parsed?.group === "net.minecraftforge" &&
+    parsed.artifact.toLowerCase().includes("forge")
+  );
+}
+
+function minecraftVersionFromForgeLibrary(library) {
+  if (!isForgeLibrary(library)) return null;
+  const parsed = parseMavenName(library.name);
+  const match = parsed?.version.match(/^\d+\.\d+(?:\.\d+)?/);
+  return match ? match[0] : null;
+}
+
+function minecraftVersionFromText(value) {
+  const matches = String(value || "").match(/\b\d+\.\d+(?:\.\d+)?\b/g) || [];
+  if (!matches.length) return null;
+
+  const preferred = matches.find((item) => item.startsWith("1."));
+  return preferred || matches[0];
+}
+
+function hasStructuredGameArguments(versionJson) {
+  return Array.isArray(versionJson?.arguments?.game) && versionJson.arguments.game.length > 0;
+}
+
+function hasLegacyGameArguments(versionJson) {
+  return typeof versionJson?.minecraftArguments === "string" &&
+    versionJson.minecraftArguments.trim().length > 0;
+}
+
+function isSelfContainedLocalVersion(versionJson, localJarPath) {
+  if (!versionJson || typeof versionJson !== "object") return false;
+  if (versionJson.inheritsFrom || versionJson.jar) return false;
+
+  const hasLibraries = Array.isArray(versionJson.libraries) && versionJson.libraries.length > 0;
+  const hasMainClass = typeof versionJson.mainClass === "string" && versionJson.mainClass.trim().length > 0;
+  const hasGameArgs =
+    hasStructuredGameArguments(versionJson) || hasLegacyGameArguments(versionJson);
+  const hasClientJarSource = Boolean(localJarPath || versionJson.downloads?.client?.url);
+
+  return hasLibraries && hasMainClass && hasGameArgs && hasClientJarSource;
 }
 
 function normalizeVersionShape(value) {
@@ -397,7 +875,14 @@ function normalizeVersionShape(value) {
     normalized.value = normalized.values;
   }
 
-  if (normalized.name && (normalized.artifact || normalized.classifies)) {
+  if (
+    normalized.name &&
+    (normalized.artifact ||
+      normalized.classifies ||
+      normalized.downloads ||
+      normalized.url ||
+      normalized.exact_url)
+  ) {
     normalizeLibraryShape(normalized);
   }
 
@@ -470,22 +955,214 @@ function writeNormalizedLaunchJson(id, versionJson) {
   return filePath;
 }
 
-function extractJvmArgs(versionJson) {
-  const args = versionJson?.arguments?.jvm || [];
-  const values = [];
+function localBaseVersionCandidates(id, versionJson) {
+  const candidates = [
+    versionJson?.inheritsFrom,
+    versionJson?.jar,
+    versionJson?.minecraftVersion,
+  ];
 
-  for (const arg of args) {
-    const raw = typeof arg === "string" ? arg : arg?.value || arg?.values;
-    const list = Array.isArray(raw) ? raw : [raw];
-    for (const item of list) {
-      if (typeof item !== "string") continue;
-      if (!item.startsWith("-D")) continue;
-      if (item.includes("${")) continue;
-      values.push(item);
+  for (const library of versionJson?.libraries || []) {
+    candidates.push(minecraftVersionFromForgeLibrary(library));
+  }
+
+  candidates.push(minecraftVersionFromText(versionJson?.id));
+  candidates.push(minecraftVersionFromText(id));
+
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+async function resolveFirstOfficialVersionMeta(candidates) {
+  if (!candidates.length) return null;
+  let manifest;
+  try {
+    manifest = await loadVersions(false);
+  } catch (_error) {
+    return null;
+  }
+
+  for (const id of candidates) {
+    const found = manifest.versions.find((item) => item.id === id && item.url);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function findMatchingLocalForgeJar(id, library) {
+  const artifactPath = libraryArtifactPath(library);
+  const expectedName = artifactPath ? path.basename(artifactPath).toLowerCase() : "";
+  const parsed = parseMavenName(library?.name);
+  const candidates = versionDirectoryJars(id).filter((filePath) =>
+    path.basename(filePath).toLowerCase().includes("forge")
+  );
+
+  if (!candidates.length) return null;
+
+  const exact = candidates.find(
+    (filePath) => path.basename(filePath).toLowerCase() === expectedName
+  );
+  if (exact) return exact;
+
+  const expectedIsInstaller = expectedName.includes("installer");
+  const version = parsed?.version?.toLowerCase() || "";
+  return (
+    candidates.find((filePath) => {
+      const name = path.basename(filePath).toLowerCase();
+      if (!expectedIsInstaller && name.includes("installer")) return false;
+      return version && name.includes(version);
+    }) || null
+  );
+}
+
+function ensureLocalForgeLibraries(id, launchJson) {
+  for (const library of launchJson?.libraries || []) {
+    if (!isForgeLibrary(library)) continue;
+
+    const artifactPath = libraryArtifactPath(library);
+    if (!artifactPath || fs.existsSync(artifactPath)) continue;
+
+    const localForgeJar = findMatchingLocalForgeJar(id, library);
+    if (!localForgeJar) continue;
+
+    ensureParent(artifactPath);
+    fs.copyFileSync(localForgeJar, artifactPath);
+    sendEvent(
+      "debug",
+      `Forge local usado: ${localForgeJar} -> ${artifactPath}`
+    );
+  }
+}
+
+function currentMinecraftOs() {
+  if (process.platform === "win32") return "windows";
+  if (process.platform === "darwin") return "osx";
+  return "linux";
+}
+
+function ruleMatches(rule) {
+  if (!rule || typeof rule !== "object") return true;
+  const os = rule.os || null;
+  if (os?.name && os.name !== currentMinecraftOs()) return false;
+  if (os?.arch && os.arch !== process.arch) return false;
+  if (rule.features) return false;
+  return true;
+}
+
+function shouldUseArgument(arg) {
+  if (!arg || typeof arg !== "object" || !Array.isArray(arg.rules)) return true;
+
+  let allowed = false;
+  for (const rule of arg.rules) {
+    if (!ruleMatches(rule)) continue;
+    allowed = rule.action === "allow";
+  }
+  return allowed;
+}
+
+function nativeDirectoryForVersion(versionJson, id) {
+  const versionId = versionJson?.id || id;
+  const minor = Number.parseInt(String(versionId).split(".")[1], 10);
+  if (!Number.isNaN(minor) && minor >= 19) return minecraftRoot();
+  return path.join(minecraftRoot(), "natives", versionId);
+}
+
+function jvmPlaceholderMap(versionJson, id) {
+  return {
+    "${natives_directory}": nativeDirectoryForVersion(versionJson, id),
+    "${launcher_name}": LAUNCHER_NAME,
+    "${launcher_version}": app.getVersion?.() || LAUNCHER_VERSION,
+    "${classpath_separator}": process.platform === "win32" ? ";" : ":",
+    "${library_directory}": path.join(minecraftRoot(), "libraries"),
+    "${version_name}": id,
+  };
+}
+
+function replaceJvmPlaceholders(value, placeholders) {
+  let output = value;
+  for (const [placeholder, replacement] of Object.entries(placeholders)) {
+    output = output.split(placeholder).join(replacement);
+  }
+  return output;
+}
+
+function argumentValues(arg) {
+  if (typeof arg === "string" || typeof arg === "number") return [String(arg)];
+  if (!arg || typeof arg !== "object" || !shouldUseArgument(arg)) return [];
+
+  const raw = arg.value || arg.values;
+  if (Array.isArray(raw)) return raw.map(String);
+  if (raw === undefined || raw === null) return [];
+  return [String(raw)];
+}
+
+function extractJvmArgs(versionJson, id) {
+  const args = Array.isArray(versionJson?.arguments?.jvm)
+    ? versionJson.arguments.jvm
+    : [];
+  const values = [];
+  const placeholders = jvmPlaceholderMap(versionJson, id);
+
+  for (let index = 0; index < args.length; index++) {
+    const list = argumentValues(args[index]);
+    for (let itemIndex = 0; itemIndex < list.length; itemIndex++) {
+      const item = list[itemIndex];
+      const next =
+        list[itemIndex + 1] || argumentValues(args[index + 1])[0] || "";
+      if (
+        ["-cp", "-classpath", "--class-path"].includes(item) &&
+        String(next).includes("${classpath}")
+      ) {
+        itemIndex += 1;
+        continue;
+      }
+
+      if (item.includes("${classpath}")) continue;
+
+      const replaced = replaceJvmPlaceholders(item, placeholders);
+      if (replaced.includes("${")) continue;
+      values.push(replaced);
     }
   }
 
   return values;
+}
+
+function directoryHasFiles(directory, depth = 2) {
+  for (const entry of safeReadDirectory(directory)) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isFile()) return true;
+    if (entry.isDirectory() && depth > 0 && directoryHasFiles(fullPath, depth - 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function directoryHasEntries(directory) {
+  return safeReadDirectory(directory).length > 0;
+}
+
+function versionGameDirectory(id) {
+  const directory = versionDirectory(id);
+
+  try {
+    if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
+      return null;
+    }
+
+    const hasInstanceFiles =
+      fs.existsSync(path.join(directory, "options.txt")) ||
+      directoryHasFiles(path.join(directory, "mods")) ||
+      directoryHasFiles(path.join(directory, "config")) ||
+      directoryHasEntries(path.join(directory, "saves")) ||
+      directoryHasEntries(path.join(directory, "resourcepacks")) ||
+      directoryHasEntries(path.join(directory, "shaderpacks"));
+
+    return hasInstanceFiles ? directory : null;
+  } catch (_error) {
+    return null;
+  }
 }
 
 function loadLocalVersions() {
@@ -588,7 +1265,7 @@ async function resolveOfficialVersionMeta(id) {
 }
 
 async function ensureVersionJson(version) {
-  const versionDir = path.join(minecraftRoot(), "versions", version.id);
+  const versionDir = versionDirectory(version.id);
   const versionJsonPath = path.join(versionDir, `${version.id}.json`);
   const existing = readJson(versionJsonPath, null);
 
@@ -700,12 +1377,7 @@ async function ensureClientJar(version, versionJson) {
     throw new Error(`A versao ${version.id} nao possui download de cliente.`);
   }
 
-  const jarPath = path.join(
-    minecraftRoot(),
-    "versions",
-    version.id,
-    `${version.id}.jar`
-  );
+  const jarPath = path.join(versionDirectory(version.id), `${version.id}.jar`);
 
   if (fs.existsSync(jarPath) && download.sha1) {
     const hash = await sha1File(jarPath);
@@ -734,47 +1406,82 @@ async function ensureClientJar(version, versionJson) {
 
 async function ensureVersionFiles(version) {
   const localJson = readJson(getLocalVersionJsonPath(version.id), null);
-  const localJarPath = getLocalVersionJarPath(version.id);
+  const localJarPath = findLocalVersionJar(version.id);
+  const gameDirectory = versionGameDirectory(version.id);
 
   if (version.local || localJson) {
     if (!localJson) {
-      if (fs.existsSync(localJarPath)) {
+      if (localJarPath) {
         return {
           ...version,
           launchNumber: version.id,
           custom: null,
           type: version.type || "local",
+          minecraftJar: localJarPath,
+          gameDirectory,
         };
       }
       throw new Error(`Versao local ${version.id} sem JSON valido.`);
     }
 
-    const baseId = localJson.inheritsFrom || null;
-    if (baseId) {
-      const baseMeta = await resolveOfficialVersionMeta(baseId);
+    const normalizedLocalJson = normalizeVersionShape(cloneJson(localJson));
+    const explicitBaseId = localJson.inheritsFrom || localJson.jar || null;
+    const selfContainedLocalVersion = isSelfContainedLocalVersion(
+      normalizedLocalJson,
+      localJarPath
+    );
+    const baseMeta = explicitBaseId
+      ? await resolveOfficialVersionMeta(explicitBaseId)
+      : selfContainedLocalVersion
+        ? null
+      : await resolveFirstOfficialVersionMeta(
+          localBaseVersionCandidates(version.id, normalizedLocalJson)
+        );
+
+    if (selfContainedLocalVersion) {
+      sendEvent(
+        "debug",
+        `Usando JSON local completo da versao ${version.id} sem mesclar manifesto oficial.`
+      );
+    }
+
+    if (baseMeta) {
       const baseJson = await ensureVersionJson(baseMeta);
-      await ensureClientJar(baseMeta, baseJson);
-      const launchJson = mergeInheritedVersion(baseJson, localJson);
+      if (explicitBaseId || !localJarPath) {
+        await ensureClientJar(baseMeta, baseJson);
+      }
+
+      const launchJson = mergeInheritedVersion(baseJson, normalizedLocalJson);
+      ensureLocalForgeLibraries(version.id, launchJson);
+      await ensureLocalLaunchLibraries(version.id, launchJson);
       const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
-      const customJar = fs.existsSync(localJarPath) ? localJarPath : null;
 
       return {
         ...version,
         type: localJson.type || version.type || "custom",
         launchNumber: version.id,
         custom: null,
-        inheritsFrom: baseId,
+        inheritsFrom: baseMeta.id,
         javaVersion: launchJson.javaVersion || baseJson.javaVersion || null,
         launchJsonPath: launchJsonFile,
-        minecraftJar: customJar || getLocalVersionJarPath(baseId),
-        extraJvmArgs: extractJvmArgs(launchJson),
+        minecraftJar: localJarPath || getLocalVersionJarPath(baseMeta.id),
+        classes: resolveLaunchClassPaths(launchJson, version.id),
+        gameDirectory,
+        extraJvmArgs: extractJvmArgs(
+          normalizedLocalJson,
+          version.id
+        ),
       };
     }
 
     if (localJson.downloads?.client?.url) {
-      await ensureClientJar({ ...version, id: version.id }, localJson);
-      const launchJson = normalizeVersionShape(cloneJson(localJson));
+      const launchJson = normalizedLocalJson;
+      ensureLocalForgeLibraries(version.id, launchJson);
+      await ensureLocalLaunchLibraries(version.id, launchJson);
       const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
+      if (!localJarPath) {
+        await ensureClientJar({ ...version, id: version.id }, launchJson);
+      }
       return {
         ...version,
         type: localJson.type || version.type || "local",
@@ -782,13 +1489,17 @@ async function ensureVersionFiles(version) {
         custom: null,
         javaVersion: launchJson.javaVersion || null,
         launchJsonPath: launchJsonFile,
-        minecraftJar: getLocalVersionJarPath(version.id),
-        extraJvmArgs: extractJvmArgs(launchJson),
+        minecraftJar: findLocalVersionJar(version.id) || getLocalVersionJarPath(version.id),
+        classes: resolveLaunchClassPaths(launchJson, version.id),
+        gameDirectory,
+        extraJvmArgs: extractJvmArgs(launchJson, version.id),
       };
     }
 
-    if (fs.existsSync(localJarPath)) {
-      const launchJson = normalizeVersionShape(cloneJson(localJson));
+    if (localJarPath) {
+      const launchJson = normalizedLocalJson;
+      ensureLocalForgeLibraries(version.id, launchJson);
+      await ensureLocalLaunchLibraries(version.id, launchJson);
       const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
       return {
         ...version,
@@ -798,7 +1509,9 @@ async function ensureVersionFiles(version) {
         javaVersion: launchJson.javaVersion || null,
         launchJsonPath: launchJsonFile,
         minecraftJar: localJarPath,
-        extraJvmArgs: extractJvmArgs(launchJson),
+        classes: resolveLaunchClassPaths(launchJson, version.id),
+        gameDirectory,
+        extraJvmArgs: extractJvmArgs(launchJson, version.id),
       };
     }
 
@@ -816,12 +1529,14 @@ async function ensureVersionFiles(version) {
     launchNumber: meta.id,
     custom: null,
     javaVersion: versionJson.javaVersion || null,
+    gameDirectory,
   };
 }
 
 function launcherOptions(version, minecraftSession, settings) {
   const selectedType = version.type || "release";
   const launchNumber = version.launchNumber || version.inheritsFrom || version.id;
+  const instanceCwd = version.gameDirectory || (version.local ? versionDirectory(version.id) : null);
   const authorization = minecraftSession.mclc();
   authorization.user_properties = JSON.stringify(
     authorization.user_properties || {}
@@ -860,8 +1575,11 @@ function launcherOptions(version, minecraftSession, settings) {
     overrides: {
       detached: false,
       maxSockets: 8,
+      cwd: instanceCwd || undefined,
+      classes: version.classes,
       versionJson: version.launchJsonPath,
       minecraftJar: version.minecraftJar,
+      gameDirectory: version.gameDirectory || undefined,
       url: {
         meta: "https://piston-meta.mojang.com",
         resource: "https://resources.download.minecraft.net",
@@ -892,7 +1610,21 @@ function wireLauncher(client) {
   const lastStatus = new Map();
 
   client.on("debug", (message) => sendEvent("debug", message));
-  client.on("data", (message) => sendEvent("game", message));
+  client.on("data", (message) => {
+    sendEvent("game", message);
+    try {
+      const text = String(message || "");
+      if (
+        text.includes("ClassCastException") &&
+        text.includes("URLClassLoader")
+      ) {
+        sendEvent(
+          "error",
+          "Erro de ClassCastException detectado (URLClassLoader). Isso indica runtime Java incompatível para esta versão modded. O launcher agora prioriza automaticamente um runtime legacy compatível quando ele existe no sistema."
+        );
+      }
+    } catch (_e) {}
+  });
   client.on("download", (name) =>
     sendEvent("download", `Baixado: ${name}`, { silent: true })
   );
@@ -961,6 +1693,23 @@ async function runMinecraft(mode, input) {
         ? `Java selecionado: ${options.javaPath}`
         : "Java selecionado: java do sistema"
     );
+    if (
+      options.javaPath &&
+      !settings.javaPath &&
+      !settings.java8Path &&
+      isLegacyJavaNeeded(preparedVersion)
+    ) {
+      sendEvent("debug", "Runtime Java legacy compativel detectado automaticamente.");
+    }
+    if (options.overrides.gameDirectory) {
+      sendEvent(
+        "debug",
+        `Diretorio da instancia: ${options.overrides.gameDirectory}`
+      );
+    }
+    if (options.overrides.cwd && options.overrides.cwd !== options.root) {
+      sendEvent("debug", `Diretorio de trabalho da instancia: ${options.overrides.cwd}`);
+    }
 
     const idleGuard = createIdleGuard(
       180000,

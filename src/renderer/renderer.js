@@ -35,6 +35,8 @@ const elements = {
   minecraftPath: document.querySelector("#minecraft-path"),
   clearLog: document.querySelector("#clear-log"),
   logOutput: document.querySelector("#log-output"),
+  java8Path: document.querySelector("#java8-path"),
+  logSize: document.querySelector("#log-size"),
 };
 
 function formatDate(value) {
@@ -71,6 +73,8 @@ function currentSettings() {
     minMemory: elements.minMemory.value,
     maxMemory: elements.maxMemory.value,
     javaPath: elements.javaPath.value,
+    java8Path: elements.java8Path.value,
+    logFontSize: Number(elements.logSize.value) || 12,
     windowWidth: elements.windowWidth.value,
     windowHeight: elements.windowHeight.value,
     versionFilter: elements.versionFilter.value,
@@ -82,9 +86,17 @@ function applySettings(settings) {
   elements.minMemory.value = settings.minMemory;
   elements.maxMemory.value = settings.maxMemory;
   elements.javaPath.value = settings.javaPath;
+  elements.java8Path.value = settings.java8Path || "";
+  elements.logSize.value = settings.logFontSize || 12;
   elements.windowWidth.value = settings.windowWidth;
   elements.windowHeight.value = settings.windowHeight;
   elements.versionFilter.value = settings.versionFilter;
+
+  // Apply log font size
+  try {
+    const size = Number(settings.logFontSize) || 12;
+    elements.logOutput.style.fontSize = `${size}px`;
+  } catch (_e) {}
 }
 
 function renderAccount() {
@@ -362,6 +374,9 @@ elements.openFolder.addEventListener("click", () => api.openMinecraftFolder());
 elements.clearLog.addEventListener("click", () => {
   elements.logOutput.textContent = "";
 });
+
+elements.logSize.addEventListener("change", saveSettingsQuietly);
+elements.java8Path.addEventListener("change", saveSettingsQuietly);
 
 [
   elements.minMemory,
