@@ -1,5 +1,5 @@
 {
-  "name": "nexus-mc-launcher",
+  "name": "socioslauncher",
   "version": "0.1.0",
   "description": "Launcher Minecraft Java original com login Microsoft e instalacao de versoes oficiais.",
   "main": "src/main.js",
@@ -16,6 +16,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "minecraft-launcher-core": "^3.18.2",
     "msmc": "^5.0.5"
   },
@@ -24,17 +25,20 @@
     "electron-builder": "^26.0.0"
   },
   "build": {
-    "appId": "com.nexus.minecraftlauncher",
-    "productName": "Nexus MC Launcher",
+    "appId": "com.socioslauncher.app",
+    "productName": "SociosLauncher",
+    "icon": "logosocios.png",
     "files": [
       "src/**/*",
-      "package.json"
+      "package.json",
+      "logosocios.png"
     ],
     "directories": {
       "output": "release"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "logosocios.png"
     },
     "nsis": {
       "oneClick": false,

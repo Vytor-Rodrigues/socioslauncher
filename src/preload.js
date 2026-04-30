@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   getState: () => ipcRenderer.invoke("state:get"),
   refreshVersions: () => ipcRenderer.invoke("versions:refresh"),
   addAccount: () => ipcRenderer.invoke("account:add"),
+  addLocalAccount: (username) => ipcRenderer.invoke("account:addLocal", username),
   removeAccount: () => ipcRenderer.invoke("account:remove"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
   installMinecraft: (payload) => ipcRenderer.invoke("minecraft:install", payload),

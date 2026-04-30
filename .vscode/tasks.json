@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build-windows-setup",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"dist"
+			],
+			"isBackground": false,
+			"group": "build"
+		}
+	]
+}

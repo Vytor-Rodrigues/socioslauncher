@@ -34,7 +34,7 @@ O instalador Windows sera gerado em `release/`.
 
 ## Dados locais
 
-O launcher salva dados em `AppData/Roaming/Nexus MC Launcher`:
+O launcher salva dados em `AppData/Roaming/SociosLauncher`:
 
 - `account.json`: refresh token Microsoft e perfil publico do Minecraft.
 - `settings.json`: memoria, Java e preferencias da UI.
