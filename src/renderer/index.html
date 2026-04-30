@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nexus MC Launcher</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <div class="brand-mark">N</div>
+          <div>
+            <h1>Nexus MC</h1>
+            <p>Java Launcher</p>
+          </div>
+        </header>
+
+        <section class="panel account-panel">
+          <div class="panel-title">
+            <span>Conta</span>
+            <span id="account-status" class="status-pill">Offline</span>
+          </div>
+          <div id="account-view" class="account-view">
+            <div class="avatar">?</div>
+            <div>
+              <strong>Nenhuma conta</strong>
+              <small>Microsoft/Minecraft</small>
+            </div>
+          </div>
+          <div class="button-row">
+            <button id="add-account" class="primary">Adicionar</button>
+            <button id="remove-account" class="secondary">Remover</button>
+          </div>
+        </section>
+
+        <section class="panel settings-panel">
+          <div class="panel-title">
+            <span>Memoria</span>
+          </div>
+          <div class="field-grid">
+            <label>
+              Min
+              <input id="min-memory" type="text" inputmode="numeric" />
+            </label>
+            <label>
+              Max
+              <input id="max-memory" type="text" inputmode="numeric" />
+            </label>
+          </div>
+          <div class="field-grid">
+            <label>
+              Largura
+              <input id="window-width" type="number" min="854" max="3840" />
+            </label>
+            <label>
+              Altura
+              <input id="window-height" type="number" min="480" max="2160" />
+            </label>
+          </div>
+          <label class="full-field">
+            Java
+            <input id="java-path" type="text" placeholder="java" />
+          </label>
+        </section>
+
+        <button id="open-folder" class="ghost full-button">Abrir pasta</button>
+      </aside>
+
+      <main class="content">
+        <section class="topbar">
+          <div>
+            <h2>Versoes oficiais</h2>
+            <p id="latest-line">Carregando manifesto...</p>
+          </div>
+          <div class="top-actions">
+            <select id="version-filter" aria-label="Filtro de versoes">
+              <option value="installed">Instaladas</option>
+              <option value="release">Releases</option>
+              <option value="snapshot">Snapshots</option>
+              <option value="all">Todas</option>
+            </select>
+            <button id="refresh-versions" class="secondary">Atualizar</button>
+          </div>
+        </section>
+
+        <section class="launcher-grid">
+          <div class="version-panel">
+            <div class="search-row">
+              <input
+                id="version-search"
+                type="search"
+                placeholder="Buscar versao"
+                autocomplete="off"
+              />
+            </div>
+            <div id="version-list" class="version-list"></div>
+          </div>
+
+          <div class="play-panel">
+            <div class="selected-version">
+              <span>Selecionada</span>
+              <strong id="selected-version">-</strong>
+              <small id="selected-meta">Escolha uma versao</small>
+            </div>
+            <div class="play-actions">
+              <button id="install-version" class="secondary big-button">
+                Instalar
+              </button>
+              <button id="launch-version" class="primary big-button">
+                Jogar
+              </button>
+            </div>
+            <div class="progress-box">
+              <div class="progress-header">
+                <span id="progress-label">Aguardando</span>
+                <span id="progress-percent">0%</span>
+              </div>
+              <div class="progress-track">
+                <div id="progress-bar" class="progress-bar"></div>
+              </div>
+            </div>
+            <div class="paths">
+              <span>Instalacao</span>
+              <code id="minecraft-path">-</code>
+            </div>
+          </div>
+        </section>
+
+        <section class="log-panel">
+          <div class="panel-title">
+            <span>Log</span>
+            <button id="clear-log" class="ghost small-button">Limpar</button>
+          </div>
+          <pre id="log-output"></pre>
+        </section>
+      </main>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
