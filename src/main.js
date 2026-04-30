@@ -38,6 +38,11 @@ function versionsCachePath() {
   return userDataPath("cache", "version_manifest_v2.json");
 }
 
+function launchJsonPath(id) {
+  const hash = crypto.createHash("sha1").update(id).digest("hex");
+  return userDataPath("cache", "launch-json", `${hash}.json`);
+}
+
 function minecraftRoot() {
   return path.join(app.getPath("appData"), ".minecraft");
 }
@@ -59,6 +64,10 @@ function readJson(filePath, fallback) {
 function writeJson(filePath, value) {
   ensureParent(filePath);
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function defaultSettings() {
@@ -118,6 +127,43 @@ function clampNumber(value, min, max, fallback) {
   const number = Number.parseInt(value, 10);
   if (Number.isNaN(number)) return fallback;
   return Math.min(max, Math.max(min, number));
+}
+
+function bundledJavaPath(component) {
+  if (!component) return "";
+
+  const candidates = [
+    path.join(
+      minecraftRoot(),
+      "runtime",
+      component,
+      "windows",
+      component,
+      "bin",
+      "java.exe"
+    ),
+    path.join(
+      minecraftRoot(),
+      "runtime",
+      component,
+      "windows",
+      component,
+      "bin",
+      "javaw.exe"
+    ),
+  ];
+
+  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
+}
+
+function resolveJavaPath(version, settings) {
+  if (settings.javaPath) return settings.javaPath;
+
+  const component = version.javaVersion?.component;
+  const javaPath = bundledJavaPath(component);
+  if (javaPath) return javaPath;
+
+  return undefined;
 }
 
 function publicAccount(account = loadAccount()) {
@@ -300,6 +346,146 @@ function localVersionFromDirectory(entry) {
     local: true,
     inheritsFrom: versionJson?.inheritsFrom || null,
   };
+}
+
+function normalizeLibraryShape(library) {
+  if (!library || typeof library !== "object") return library;
+
+  if (library.artifact && !library.downloads?.artifact) {
+    library.downloads = {
+      ...(library.downloads || {}),
+      artifact: library.artifact,
+    };
+  }
+
+  if (library.classifies && !library.downloads?.classifiers) {
+    const classifiers = {};
+    for (const [key, value] of Object.entries(library.classifies)) {
+      classifiers[key] = value;
+      classifiers[`natives-${key}`] = value;
+    }
+
+    if (!classifiers["natives-windows"] && library.classifies["windows-64"]) {
+      classifiers["natives-windows"] = library.classifies["windows-64"];
+    }
+    if (!classifiers["natives-osx"] && library.classifies.osx) {
+      classifiers["natives-osx"] = library.classifies.osx;
+    }
+    if (!classifiers["natives-linux"] && library.classifies.linux) {
+      classifiers["natives-linux"] = library.classifies.linux;
+    }
+
+    library.downloads = {
+      ...(library.downloads || {}),
+      classifiers,
+    };
+  }
+
+  return library;
+}
+
+function normalizeVersionShape(value) {
+  if (Array.isArray(value)) return value.map(normalizeVersionShape);
+  if (!value || typeof value !== "object") return value;
+
+  const normalized = {};
+  for (const [key, child] of Object.entries(value)) {
+    normalized[key] = normalizeVersionShape(child);
+  }
+
+  if (normalized.values !== undefined && normalized.value === undefined) {
+    normalized.value = normalized.values;
+  }
+
+  if (normalized.name && (normalized.artifact || normalized.classifies)) {
+    normalizeLibraryShape(normalized);
+  }
+
+  return normalized;
+}
+
+function uniqueLibraries(libraries) {
+  const seen = new Set();
+  const output = [];
+
+  for (const library of libraries.filter(Boolean)) {
+    const key = library.name || JSON.stringify(library);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(library);
+  }
+
+  return output;
+}
+
+function mergeArguments(baseArguments = {}, childArguments = {}) {
+  const merged = { ...baseArguments, ...childArguments };
+
+  if (baseArguments.game || childArguments.game) {
+    merged.game =
+      childArguments.game && childArguments.game.length
+        ? [...(baseArguments.game || []), ...childArguments.game]
+        : baseArguments.game || childArguments.game || [];
+  }
+
+  if (baseArguments.jvm || childArguments.jvm) {
+    merged.jvm = [...(baseArguments.jvm || []), ...(childArguments.jvm || [])];
+  }
+
+  return merged;
+}
+
+function mergeInheritedVersion(baseJson, childJson) {
+  const base = normalizeVersionShape(cloneJson(baseJson));
+  const child = normalizeVersionShape(cloneJson(childJson));
+  const merged = {
+    ...base,
+    ...child,
+    id: child.id || base.id,
+    type: child.type || base.type,
+    mainClass: child.mainClass || base.mainClass,
+    libraries: uniqueLibraries([...(child.libraries || []), ...(base.libraries || [])]),
+    arguments: mergeArguments(base.arguments, child.arguments),
+  };
+
+  if (!child.minecraftArguments && base.minecraftArguments) {
+    merged.minecraftArguments = base.minecraftArguments;
+  }
+  if (!child.assetIndex && base.assetIndex) merged.assetIndex = base.assetIndex;
+  if ((!child.assets || child.assets === "legacy") && base.assets) {
+    merged.assets = base.assets;
+  }
+  if (!child.downloads && base.downloads) merged.downloads = base.downloads;
+  if (!child.javaVersion && base.javaVersion) merged.javaVersion = base.javaVersion;
+  if (!child.logging && base.logging) merged.logging = base.logging;
+
+  delete merged.inheritsFrom;
+  return merged;
+}
+
+function writeNormalizedLaunchJson(id, versionJson) {
+  const normalized = normalizeVersionShape(cloneJson(versionJson));
+  const filePath = launchJsonPath(id);
+  writeJson(filePath, normalized);
+  return filePath;
+}
+
+function extractJvmArgs(versionJson) {
+  const args = versionJson?.arguments?.jvm || [];
+  const values = [];
+
+  for (const arg of args) {
+    const raw = typeof arg === "string" ? arg : arg?.value || arg?.values;
+    const list = Array.isArray(raw) ? raw : [raw];
+    for (const item of list) {
+      if (typeof item !== "string") continue;
+      if (!item.startsWith("-D")) continue;
+      if (item.includes("${")) continue;
+      values.push(item);
+    }
+  }
+
+  return values;
 }
 
 function loadLocalVersions() {
@@ -568,32 +754,51 @@ async function ensureVersionFiles(version) {
       const baseMeta = await resolveOfficialVersionMeta(baseId);
       const baseJson = await ensureVersionJson(baseMeta);
       await ensureClientJar(baseMeta, baseJson);
+      const launchJson = mergeInheritedVersion(baseJson, localJson);
+      const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
+      const customJar = fs.existsSync(localJarPath) ? localJarPath : null;
 
       return {
         ...version,
-        type: version.type || localJson.type || "custom",
-        launchNumber: baseId,
-        custom: version.id,
+        type: localJson.type || version.type || "custom",
+        launchNumber: version.id,
+        custom: null,
         inheritsFrom: baseId,
+        javaVersion: launchJson.javaVersion || baseJson.javaVersion || null,
+        launchJsonPath: launchJsonFile,
+        minecraftJar: customJar || getLocalVersionJarPath(baseId),
+        extraJvmArgs: extractJvmArgs(launchJson),
       };
     }
 
     if (localJson.downloads?.client?.url) {
       await ensureClientJar({ ...version, id: version.id }, localJson);
+      const launchJson = normalizeVersionShape(cloneJson(localJson));
+      const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
       return {
         ...version,
-        type: version.type || localJson.type || "local",
+        type: localJson.type || version.type || "local",
         launchNumber: version.id,
         custom: null,
+        javaVersion: launchJson.javaVersion || null,
+        launchJsonPath: launchJsonFile,
+        minecraftJar: getLocalVersionJarPath(version.id),
+        extraJvmArgs: extractJvmArgs(launchJson),
       };
     }
 
     if (fs.existsSync(localJarPath)) {
+      const launchJson = normalizeVersionShape(cloneJson(localJson));
+      const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
       return {
         ...version,
-        type: version.type || localJson.type || "local",
+        type: localJson.type || version.type || "local",
         launchNumber: version.id,
         custom: null,
+        javaVersion: launchJson.javaVersion || null,
+        launchJsonPath: launchJsonFile,
+        minecraftJar: localJarPath,
+        extraJvmArgs: extractJvmArgs(launchJson),
       };
     }
 
@@ -610,15 +815,25 @@ async function ensureVersionFiles(version) {
     type: meta.type || versionJson.type || "release",
     launchNumber: meta.id,
     custom: null,
+    javaVersion: versionJson.javaVersion || null,
   };
 }
 
 function launcherOptions(version, minecraftSession, settings) {
   const selectedType = version.type || "release";
   const launchNumber = version.launchNumber || version.inheritsFrom || version.id;
+  const authorization = minecraftSession.mclc();
+  authorization.user_properties = JSON.stringify(
+    authorization.user_properties || {}
+  );
+  authorization.meta = {
+    ...authorization.meta,
+    clientId: authorization.meta?.clientId || "00000000402b5328",
+  };
+
   return {
     clientPackage: null,
-    authorization: minecraftSession.mclc(),
+    authorization,
     root: minecraftRoot(),
     version: {
       number: launchNumber,
@@ -629,7 +844,14 @@ function launcherOptions(version, minecraftSession, settings) {
       max: normalizeMemory(settings.maxMemory, "4G"),
       min: normalizeMemory(settings.minMemory, "1G"),
     },
-    javaPath: settings.javaPath || undefined,
+    javaPath: resolveJavaPath(version, settings),
+    customArgs: [
+      "-Djava.net.preferIPv4Stack=true",
+      "-Djava.net.preferIPv4Addresses=true",
+      "-Dsun.net.client.defaultConnectTimeout=20000",
+      "-Dsun.net.client.defaultReadTimeout=20000",
+      ...(version.extraJvmArgs || []),
+    ],
     window: {
       width: clampNumber(settings.windowWidth, 854, 3840, 1280),
       height: clampNumber(settings.windowHeight, 480, 2160, 720),
@@ -638,6 +860,8 @@ function launcherOptions(version, minecraftSession, settings) {
     overrides: {
       detached: false,
       maxSockets: 8,
+      versionJson: version.launchJsonPath,
+      minecraftJar: version.minecraftJar,
       url: {
         meta: "https://piston-meta.mojang.com",
         resource: "https://resources.download.minecraft.net",
@@ -730,6 +954,13 @@ async function runMinecraft(mode, input) {
     const preparedVersion = await ensureVersionFiles(input.version);
     const client = mode === "install" ? new InstallOnlyClient() : new Client();
     wireLauncher(client);
+    const options = launcherOptions(preparedVersion, minecraft, settings);
+    sendEvent(
+      "debug",
+      options.javaPath
+        ? `Java selecionado: ${options.javaPath}`
+        : "Java selecionado: java do sistema"
+    );
 
     const idleGuard = createIdleGuard(
       180000,
@@ -738,7 +969,7 @@ async function runMinecraft(mode, input) {
     activeIdleGuard = idleGuard;
 
     activeProcess = await Promise.race([
-      client.launch(launcherOptions(preparedVersion, minecraft, settings)),
+      client.launch(options),
       idleGuard.promise,
     ]);
     idleGuard.stop();
