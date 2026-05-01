@@ -3,6 +3,10 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("launcherApi", {
   getState: () => ipcRenderer.invoke("state:get"),
   refreshVersions: () => ipcRenderer.invoke("versions:refresh"),
+  uninstallVersion: (payload) => ipcRenderer.invoke("version:uninstall", payload),
+  searchModpacks: (query) => ipcRenderer.invoke("modpacks:search", query),
+  getModpackVersions: (projectId) => ipcRenderer.invoke("modpacks:versions", projectId),
+  installModpack: (payload) => ipcRenderer.invoke("modpacks:install", payload),
   addAccount: () => ipcRenderer.invoke("account:add"),
   addLocalAccount: (username) => ipcRenderer.invoke("account:addLocal", username),
   removeAccount: () => ipcRenderer.invoke("account:remove"),

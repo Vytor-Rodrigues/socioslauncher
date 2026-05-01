@@ -11,8 +11,10 @@ const VERSION_MANIFEST_URL =
   "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const FABRIC_META_ROOT = "https://meta.fabricmc.net/v2/versions/loader";
 const BMCL_API_ROOT = "https://bmclapi2.bangbang93.com";
-const LAUNCHER_NAME = "SociosLauncher";
+const MODRINTH_API_ROOT = "https://api.modrinth.com/v2";
+const LAUNCHER_NAME = "Socios Client";
 const LAUNCHER_VERSION = "0.1.0";
+const HTTP_USER_AGENT = `${LAUNCHER_NAME}/${LAUNCHER_VERSION}`;
 const SETTINGS_SCHEMA_VERSION = 3;
 const REMOTE_GAME_VERSION_LIMIT = 36;
 
@@ -25,7 +27,7 @@ let activeLaunchContext = null;
 class InstallOnlyClient extends Client {
   startMinecraft() {
     this.installSucceeded = true;
-    this.emit("debug", "[SociosLauncher]: Instalacao concluida. O jogo nao sera aberto.");
+    this.emit("debug", "[Socios Client]: Instalacao concluida. O jogo nao sera aberto.");
     setImmediate(() => this.emit("close", 0));
     return null;
   }
@@ -55,6 +57,16 @@ function installerCachePath(loader, id, fileName) {
   return userDataPath("cache", "installers", loader, id, fileName);
 }
 
+function modpackArchiveCachePath(projectId, versionId, fileName) {
+  return userDataPath(
+    "cache",
+    "modpacks",
+    sanitizeFileName(projectId),
+    sanitizeFileName(versionId),
+    sanitizeFileName(fileName || `${versionId}.mrpack`)
+  );
+}
+
 function launchJsonPath(id) {
   const hash = crypto.createHash("sha1").update(id).digest("hex");
   return userDataPath("cache", "launch-json", `${hash}.json`);
@@ -77,7 +89,7 @@ function readJson(filePath, fallback) {
     if (!fs.existsSync(filePath)) return fallback;
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch (error) {
-    console.warn(`[SociosLauncher]: Failed to read ${filePath}`, error);
+    console.warn(`[Socios Client]: Failed to read ${filePath}`, error);
     return fallback;
   }
 }
@@ -543,6 +555,30 @@ function clearLaunchContext(context) {
   activeLaunchContext = null;
 }
 
+function uninstallVersion(input) {
+  if (busy) throw new Error("Ja existe uma instalacao ou jogo em andamento.");
+
+  const id = String(input?.id || "").trim();
+  if (!id) {
+    throw new Error("Versao nao informada para desinstalacao.");
+  }
+
+  const directory = versionDirectory(id);
+  if (!fs.existsSync(directory)) {
+    throw new Error(`A versao ${id} nao esta instalada.`);
+  }
+
+  fs.rmSync(directory, { recursive: true, force: true });
+
+  const launchJson = launchJsonPath(id);
+  if (fs.existsSync(launchJson)) {
+    fs.rmSync(launchJson, { force: true });
+  }
+
+  sendEvent("success", `Versao ${id} desinstalada.`);
+  return { ok: true, id };
+}
+
 function finalizeLaunchContext(context, code, source = "client") {
   if (!context || activeLaunchContext !== context || context.finished) return;
   context.finished = true;
@@ -739,6 +775,13 @@ function localVersionFromDirectory(entry) {
     installed: true,
     local: true,
     inheritsFrom: versionJson?.inheritsFrom || null,
+    minecraftVersion: versionJson?.minecraftVersion || versionJson?.inheritsFrom || null,
+    loaderType: versionJson?.loaderType || null,
+    loaderVersion: versionJson?.loaderVersion || null,
+    modpackTitle: versionJson?.modpackTitle || null,
+    modpackProjectId: versionJson?.modpackProjectId || null,
+    modpackVersionId: versionJson?.modpackVersionId || null,
+    modpackVersionNumber: versionJson?.modpackVersionNumber || null,
   };
 }
 
@@ -1367,7 +1410,7 @@ function sanitizeFileName(value) {
 
 async function fetchJson(url, label) {
   const response = await fetch(url, {
-    headers: { "User-Agent": "SociosLauncher/0.1" },
+    headers: { "User-Agent": HTTP_USER_AGENT },
   });
 
   if (!response.ok) {
@@ -1375,6 +1418,499 @@ async function fetchJson(url, label) {
   }
 
   return response.json();
+}
+
+function searchModpacksUrl(query, limit = 24) {
+  const url = new URL(`${MODRINTH_API_ROOT}/search`);
+  const normalizedQuery = String(query || "").trim();
+  url.searchParams.set("limit", String(Math.min(50, Math.max(1, Number(limit) || 24))));
+  url.searchParams.set("index", normalizedQuery ? "relevance" : "downloads");
+  url.searchParams.set("facets", JSON.stringify([["project_type:modpack"]]));
+  if (normalizedQuery) {
+    url.searchParams.set("query", normalizedQuery);
+  }
+  return url.toString();
+}
+
+async function searchModpacks(query, limit = 24) {
+  const result = await fetchJson(searchModpacksUrl(query, limit), "Modrinth search");
+  const hits = Array.isArray(result?.hits) ? result.hits : [];
+
+  return {
+    hits: hits.map((hit) => ({
+      projectId: hit.project_id,
+      slug: hit.slug || hit.project_id,
+      title: hit.title || hit.name || hit.project_id,
+      description: hit.description || hit.summary || "",
+      author: hit.author || "",
+      iconUrl: hit.icon_url || "",
+      downloads: Number(hit.downloads) || 0,
+      follows: Number(hit.follows) || 0,
+      latestVersion: hit.latest_version || "",
+      gameVersions: Array.isArray(hit.versions) ? hit.versions : [],
+      categories:
+        Array.isArray(hit.display_categories) && hit.display_categories.length
+          ? hit.display_categories
+          : Array.isArray(hit.categories)
+            ? hit.categories
+            : [],
+    })),
+    totalHits: Number(result?.total_hits) || hits.length,
+    offset: Number(result?.offset) || 0,
+    limit: Number(result?.limit) || limit,
+  };
+}
+
+async function modrinthProjectVersions(projectId) {
+  const url = new URL(
+    `${MODRINTH_API_ROOT}/project/${encodeURIComponent(projectId)}/version`
+  );
+  url.searchParams.set("include_changelog", "false");
+  const versions = await fetchJson(url.toString(), `Modrinth versions ${projectId}`);
+  return Array.isArray(versions) ? versions : [];
+}
+
+function primaryModpackFile(version) {
+  if (!Array.isArray(version?.files) || !version.files.length) return null;
+  return version.files.find((file) => file?.primary) || version.files[0];
+}
+
+function modpackDependencyInfo(dependencies) {
+  const source = dependencies && typeof dependencies === "object" ? dependencies : {};
+  const minecraftVersion = String(source.minecraft || "").trim();
+
+  if (source["fabric-loader"]) {
+    return {
+      minecraftVersion,
+      loaderType: "fabric",
+      loaderVersion: String(source["fabric-loader"] || "").trim(),
+    };
+  }
+
+  if (source.forge) {
+    return {
+      minecraftVersion,
+      loaderType: "forge",
+      loaderVersion: String(source.forge || "").trim(),
+    };
+  }
+
+  if (source["quilt-loader"]) {
+    return {
+      minecraftVersion,
+      loaderType: "quilt",
+      loaderVersion: String(source["quilt-loader"] || "").trim(),
+    };
+  }
+
+  if (source.neoforge || source["neo-forge"]) {
+    return {
+      minecraftVersion,
+      loaderType: "neoforge",
+      loaderVersion: String(source.neoforge || source["neo-forge"] || "").trim(),
+    };
+  }
+
+  return {
+    minecraftVersion,
+    loaderType: null,
+    loaderVersion: null,
+  };
+}
+
+function modpackVersionLoaderNames(version) {
+  const rawLoaders = Array.isArray(version?.mrpack_loaders) && version.mrpack_loaders.length
+    ? version.mrpack_loaders
+    : Array.isArray(version?.loaders)
+      ? version.loaders
+      : [];
+
+  return rawLoaders
+    .map((loader) => String(loader || "").trim().toLowerCase())
+    .filter((loader) => loader && loader !== "mrpack");
+}
+
+function modpackVersionInfo(version) {
+  const minecraftVersion = Array.isArray(version?.game_versions)
+    ? String(version.game_versions.find(Boolean) || "").trim()
+    : "";
+  const loaders = modpackVersionLoaderNames(version);
+
+  let loaderType = null;
+  if (loaders.includes("fabric")) {
+    loaderType = "fabric";
+  } else if (loaders.includes("forge")) {
+    loaderType = "forge";
+  } else if (loaders.includes("quilt")) {
+    loaderType = "quilt";
+  } else if (loaders.includes("neoforge")) {
+    loaderType = "neoforge";
+  } else if (loaders.includes("minecraft") || loaders.length === 0) {
+    loaderType = null;
+  }
+
+  return {
+    minecraftVersion,
+    loaderType,
+    loaderVersion: null,
+  };
+}
+
+function supportedModpackDependencyInfo(info) {
+  return Boolean(info?.minecraftVersion) && (!info.loaderType || ["fabric", "forge"].includes(info.loaderType));
+}
+
+function supportedModpackError(info) {
+  if (!info?.minecraftVersion) {
+    return "O modpack nao informa a versao base do Minecraft.";
+  }
+
+  if (info.loaderType && !["fabric", "forge"].includes(info.loaderType)) {
+    return `Este launcher instala modpacks vanilla, Fabric e Forge. Loader nao suportado: ${info.loaderType}.`;
+  }
+
+  return "Nenhuma versao compativel do modpack foi encontrada.";
+}
+
+function selectSupportedModpackVersion(versions) {
+  let fallbackError = "Nenhuma versao compativel do modpack foi encontrada.";
+
+  for (const version of versions) {
+    const file = primaryModpackFile(version);
+    const info = modpackVersionInfo(version);
+
+    if (!file?.url) {
+      continue;
+    }
+
+    if (!supportedModpackDependencyInfo(info)) {
+      fallbackError = supportedModpackError(info);
+      continue;
+    }
+
+    return { version, file, dependencyInfo: info };
+  }
+
+  throw new Error(fallbackError);
+}
+
+function compatibleModpackVersions(versions) {
+  const results = [];
+
+  for (const version of Array.isArray(versions) ? versions : []) {
+    const file = primaryModpackFile(version);
+    const info = modpackVersionInfo(version);
+
+    if (!file?.url || !supportedModpackDependencyInfo(info)) {
+      continue;
+    }
+
+    results.push({
+      id: version.id,
+      name: version.name || version.version_number || version.id,
+      versionNumber: version.version_number || version.name || version.id,
+      minecraftVersion: info.minecraftVersion,
+      loaderType: info.loaderType || "vanilla",
+      publishedAt: version.date_published || version.date_created || null,
+      featured: Boolean(version.featured),
+    });
+  }
+
+  return results;
+}
+
+function selectModpackVersionById(versions, versionId) {
+  const normalizedId = String(versionId || "").trim();
+  if (!normalizedId) {
+    return selectSupportedModpackVersion(versions);
+  }
+
+  const selectedVersion = Array.isArray(versions)
+    ? versions.find((version) => String(version?.id || "") === normalizedId)
+    : null;
+
+  if (!selectedVersion) {
+    throw new Error("A versao escolhida do modpack nao foi encontrada.");
+  }
+
+  const file = primaryModpackFile(selectedVersion);
+  const info = modpackVersionInfo(selectedVersion);
+
+  if (!file?.url || !supportedModpackDependencyInfo(info)) {
+    throw new Error(supportedModpackError(info));
+  }
+
+  return { version: selectedVersion, file, dependencyInfo: info };
+}
+
+async function getModpackVersions(projectId) {
+  if (!projectId) {
+    throw new Error("Projeto do modpack nao informado.");
+  }
+
+  const versions = await modrinthProjectVersions(projectId);
+  const compatible = compatibleModpackVersions(versions);
+
+  if (!compatible.length) {
+    selectSupportedModpackVersion(versions);
+  }
+
+  return compatible;
+}
+
+function modpackInstallVersionId(project, version) {
+  const slug = sanitizeFileName(project?.slug || project?.projectId || project?.title || "modpack")
+    .toLowerCase();
+  const versionPart = sanitizeFileName(version?.version_number || version?.id || "latest")
+    .toLowerCase();
+  return `modrinth-${slug}-${versionPart}`;
+}
+
+function resolveModpackPath(baseDirectory, relativePath) {
+  const normalizedRelative = path.normalize(String(relativePath || "").replace(/\\/g, "/"));
+  const resolvedBase = path.resolve(baseDirectory);
+  const resolvedPath = path.resolve(resolvedBase, normalizedRelative);
+
+  if (resolvedPath !== resolvedBase && !resolvedPath.startsWith(`${resolvedBase}${path.sep}`)) {
+    throw new Error(`Caminho invalido no modpack: ${relativePath}`);
+  }
+
+  return resolvedPath;
+}
+
+function readModpackIndex(zip) {
+  const index = readInstallerJsonEntry(zip, "modrinth.index.json");
+  if (!index || typeof index !== "object") {
+    throw new Error("Arquivo modrinth.index.json ausente ou invalido no modpack.");
+  }
+  return index;
+}
+
+function extractModpackOverrides(zip, prefix, destinationDirectory) {
+  for (const entry of zip.getEntries()) {
+    const entryName = String(entry.entryName || "");
+    if (!entryName.startsWith(prefix)) continue;
+    if (entry.isDirectory || entryName.endsWith("/")) continue;
+
+    const relativeName = entryName.slice(prefix.length);
+    if (!relativeName) continue;
+
+    const targetPath = resolveModpackPath(destinationDirectory, relativeName);
+    ensureParent(targetPath);
+    fs.writeFileSync(targetPath, entry.getData());
+  }
+}
+
+async function ensureModpackIndexedFile(file, destinationDirectory) {
+  const targetPath = resolveModpackPath(destinationDirectory, file.path);
+  ensureParent(targetPath);
+
+  if (fs.existsSync(targetPath) && file?.hashes?.sha1) {
+    const existingHash = await sha1File(targetPath).catch(() => null);
+    if (existingHash === file.hashes.sha1) {
+      return targetPath;
+    }
+  }
+
+  await downloadFileWithCandidates(
+    file.downloads || [file.url],
+    targetPath,
+    "classes-custom",
+    path.basename(file.path || targetPath)
+  );
+
+  if (file?.hashes?.sha1) {
+    const downloadedHash = await sha1File(targetPath);
+    if (downloadedHash !== file.hashes.sha1) {
+      if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+      throw new Error(`Arquivo ${file.path} baixado com hash invalido.`);
+    }
+  }
+
+  return targetPath;
+}
+
+function remoteFabricVersion(versionInfo) {
+  const id = formatFabricVersionId(versionInfo.minecraftVersion, versionInfo.loaderVersion);
+  return {
+    id,
+    type: "fabric",
+    url: `${FABRIC_META_ROOT}/${encodeURIComponent(versionInfo.minecraftVersion)}/${encodeURIComponent(
+      versionInfo.loaderVersion
+    )}/profile/json`,
+    time: new Date().toISOString(),
+    releaseTime: new Date().toISOString(),
+    complianceLevel: null,
+    installed: isVersionInstalled(id),
+    local: false,
+    inheritsFrom: versionInfo.minecraftVersion,
+    remoteLoader: true,
+    loaderType: "fabric",
+    loaderVersion: versionInfo.loaderVersion,
+    minecraftVersion: versionInfo.minecraftVersion,
+  };
+}
+
+function remoteForgeVersion(versionInfo) {
+  const id = formatForgeVersionId(versionInfo.minecraftVersion, versionInfo.loaderVersion);
+  const urls = forgeInstallerUrls(versionInfo.minecraftVersion, versionInfo.loaderVersion);
+  return {
+    id,
+    type: "forge",
+    url: null,
+    time: new Date().toISOString(),
+    releaseTime: new Date().toISOString(),
+    complianceLevel: null,
+    installed: isVersionInstalled(id),
+    local: false,
+    inheritsFrom: versionInfo.minecraftVersion,
+    remoteLoader: true,
+    loaderType: "forge",
+    loaderVersion: versionInfo.loaderVersion,
+    minecraftVersion: versionInfo.minecraftVersion,
+    installerUrl: urls[0],
+    installerUrls: urls,
+  };
+}
+
+async function prepareModpackBaseJson(versionInfo) {
+  if (versionInfo.loaderType === "fabric") {
+    const installedId = await installRemoteFabricVersion(remoteFabricVersion(versionInfo));
+    const versionJson = readJson(getLocalVersionJsonPath(installedId), null);
+    if (!versionJson) {
+      throw new Error(`Nao foi possivel preparar o loader Fabric para ${versionInfo.minecraftVersion}.`);
+    }
+    return normalizeVersionShape(cloneJson(versionJson));
+  }
+
+  if (versionInfo.loaderType === "forge") {
+    const installedId = await installRemoteForgeVersion(remoteForgeVersion(versionInfo));
+    const versionJson = readJson(getLocalVersionJsonPath(installedId), null);
+    if (!versionJson) {
+      throw new Error(`Nao foi possivel preparar o loader Forge para ${versionInfo.minecraftVersion}.`);
+    }
+    return normalizeVersionShape(cloneJson(versionJson));
+  }
+
+  await ensureBaseVersionReady(versionInfo.minecraftVersion);
+  return {
+    id: versionInfo.minecraftVersion,
+    inheritsFrom: versionInfo.minecraftVersion,
+  };
+}
+
+function buildInstalledModpackVersionJson(modpackId, project, version, versionInfo, baseJson) {
+  const versionJson = normalizeVersionShape(cloneJson(baseJson || {}));
+
+  versionJson.id = modpackId;
+  versionJson.type = "modpack";
+  versionJson.inheritsFrom = versionJson.inheritsFrom || versionInfo.minecraftVersion;
+  versionJson.time = new Date().toISOString();
+  versionJson.releaseTime = version?.date_published || new Date().toISOString();
+  versionJson.minecraftVersion = versionInfo.minecraftVersion;
+  versionJson.loaderType = versionInfo.loaderType || "vanilla";
+  versionJson.loaderVersion = versionInfo.loaderVersion || "";
+  versionJson.modpackProjectId = project.projectId;
+  versionJson.modpackVersionId = version.id;
+  versionJson.modpackTitle = project.title || project.projectId;
+  versionJson.modpackVersionNumber = version.version_number || version.name || version.id;
+  if (project.author) {
+    versionJson.modpackAuthor = project.author;
+  }
+
+  return versionJson;
+}
+
+async function installModpack(payload) {
+  if (busy) throw new Error("Ja existe uma instalacao ou jogo em andamento.");
+  if (!payload?.projectId) {
+    throw new Error("Projeto do modpack nao informado.");
+  }
+
+  busy = true;
+  const projectLabel = payload.title || payload.projectId;
+  sendEvent("install", `Buscando modpack ${projectLabel}...`);
+
+  try {
+    const projectVersions = await modrinthProjectVersions(payload.projectId);
+    const selected = selectModpackVersionById(projectVersions, payload.versionId);
+    const archiveFileName = selected.file.filename || `${selected.version.id}.mrpack`;
+    const archivePath = modpackArchiveCachePath(
+      payload.projectId,
+      selected.version.id,
+      archiveFileName
+    );
+
+    sendEvent(
+      "debug",
+      `Versao do modpack escolhida: ${selected.version.version_number || selected.version.id}`
+    );
+
+    if (!fs.existsSync(archivePath)) {
+      await downloadFileWithCandidates(
+        [selected.file.url],
+        archivePath,
+        "client-package",
+        `Modpack ${projectLabel}`
+      );
+    }
+
+    const archive = new AdmZip(archivePath);
+    const modpackIndex = readModpackIndex(archive);
+    if (modpackIndex.game && modpackIndex.game !== "minecraft") {
+      throw new Error(`Jogo nao suportado pelo modpack: ${modpackIndex.game}`);
+    }
+
+    const versionInfo = modpackDependencyInfo(
+      modpackIndex.dependencies && Object.keys(modpackIndex.dependencies).length
+        ? modpackIndex.dependencies
+        : selected.version.dependencies
+    );
+
+    if (!supportedModpackDependencyInfo(versionInfo)) {
+      throw new Error(supportedModpackError(versionInfo));
+    }
+
+    const modpackId = modpackInstallVersionId(payload, selected.version);
+    const versionDir = versionDirectory(modpackId);
+    fs.mkdirSync(versionDir, { recursive: true });
+
+    const baseJson = await prepareModpackBaseJson(versionInfo);
+
+    sendEvent("install", `Baixando arquivos do modpack ${projectLabel}...`);
+    for (const file of Array.isArray(modpackIndex.files) ? modpackIndex.files : []) {
+      if (!file?.path) continue;
+      await ensureModpackIndexedFile(file, versionDir);
+    }
+
+    extractModpackOverrides(archive, "overrides/", versionDir);
+    extractModpackOverrides(archive, "client-overrides/", versionDir);
+
+    const installedVersionJson = buildInstalledModpackVersionJson(
+      modpackId,
+      payload,
+      selected.version,
+      versionInfo,
+      baseJson
+    );
+    writeJson(getLocalVersionJsonPath(modpackId), installedVersionJson);
+
+    await loadVersions(true).catch(() => null);
+
+    sendEvent("success", `${projectLabel} instalado com sucesso.`);
+    return {
+      ok: true,
+      versionId: modpackId,
+      title: projectLabel,
+      versionNumber: selected.version.version_number || selected.version.id,
+      projectId: payload.projectId,
+    };
+  } catch (error) {
+    sendEvent("error", error.message || String(error));
+    throw error;
+  } finally {
+    busy = false;
+  }
 }
 
 async function loadCachedRemoteCatalog(name, force, loader) {
@@ -2280,7 +2816,7 @@ async function loadVersions(force = false) {
 
   try {
     const response = await fetch(VERSION_MANIFEST_URL, {
-      headers: { "User-Agent": "SociosLauncher/0.1" },
+      headers: { "User-Agent": HTTP_USER_AGENT },
     });
     if (!response.ok) {
       throw new Error(`Manifest HTTP ${response.status}`);
@@ -2336,7 +2872,7 @@ async function ensureVersionJson(version) {
 
   sendEvent("install", `Baixando manifesto da versao ${version.id}...`);
   const response = await fetch(meta.url, {
-    headers: { "User-Agent": "SociosLauncher/0.1" },
+    headers: { "User-Agent": HTTP_USER_AGENT },
   });
 
   if (!response.ok) {
@@ -2374,7 +2910,7 @@ async function downloadFile(url, destination, type, label) {
 
   try {
     const response = await fetch(url, {
-      headers: { "User-Agent": "SociosLauncher/0.1" },
+      headers: { "User-Agent": HTTP_USER_AGENT },
       signal: controller.signal,
     });
 
@@ -2884,7 +3420,7 @@ function createWindow() {
     height: 760,
     minWidth: 980,
     minHeight: 650,
-    title: "SociosLauncher",
+    title: "Socios Client",
     autoHideMenuBar: true,
     backgroundColor: "#171918",
     icon: path.join(app.getAppPath(), "logosocios.png"),
@@ -2901,6 +3437,10 @@ function createWindow() {
 app.whenReady().then(() => {
   ipcMain.handle("state:get", () => getState());
   ipcMain.handle("versions:refresh", () => loadVersions(true));
+  ipcMain.handle("version:uninstall", (_event, payload) => uninstallVersion(payload));
+  ipcMain.handle("modpacks:search", (_event, query) => searchModpacks(query));
+  ipcMain.handle("modpacks:versions", (_event, projectId) => getModpackVersions(projectId));
+  ipcMain.handle("modpacks:install", (_event, payload) => installModpack(payload));
   ipcMain.handle("account:add", () => addMicrosoftAccount());
   ipcMain.handle("account:addLocal", (_event, username) => addLocalAccount(username));
   ipcMain.handle("account:remove", () => {

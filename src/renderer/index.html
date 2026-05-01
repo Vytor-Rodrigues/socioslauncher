@@ -3,19 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SociosLauncher</title>
+    <title>Socios Client</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
         <header class="brand">
-          <div class="brand-mark">N</div>
+          <img class="brand-mark" src="../../logosocios.png" alt="Logo Socios Client" />
           <div>
-            <h1>SociosLauncher</h1>
-            <p>Java Launcher</p>
+            <h1>Socios Client</h1>
+            <p>Java Client</p>
           </div>
         </header>
+
+        <section class="sidebar-nav">
+          <button id="nav-versions" class="nav-button active" type="button">Versoes</button>
+          <button id="nav-modpacks" class="nav-button" type="button">Modpacks</button>
+        </section>
 
         <section class="panel account-panel">
           <div class="panel-title">
@@ -80,7 +85,7 @@
       <main class="content">
         <section class="topbar">
           <div>
-            <h2>Versoes</h2>
+            <h2 id="topbar-title">Versoes</h2>
             <p id="latest-line">Carregando manifesto...</p>
           </div>
           <div class="top-actions">
@@ -97,8 +102,16 @@
           </div>
         </section>
 
-        <section class="launcher-grid">
+        <section id="launcher-grid" class="launcher-grid">
           <div class="version-panel">
+            <div id="modpack-subtabs" class="subtab-row hidden">
+              <button id="modpacks-search-tab" class="nav-button active" type="button">
+                Pesquise
+              </button>
+              <button id="modpacks-downloaded-tab" class="nav-button" type="button">
+                Baixados
+              </button>
+            </div>
             <div class="search-row">
               <input
                 id="version-search"
@@ -110,19 +123,26 @@
             <div id="version-list" class="version-list"></div>
           </div>
 
-          <div class="play-panel">
-            <div class="selected-version">
-              <span>Selecionada</span>
-              <strong id="selected-version">-</strong>
-              <small id="selected-meta">Escolha uma versao</small>
-            </div>
-            <div class="play-actions">
-              <button id="install-version" class="secondary big-button">
-                Instalar
-              </button>
-              <button id="launch-version" class="primary big-button">
-                Jogar
-              </button>
+          <div id="play-panel" class="play-panel">
+            <div id="selected-panel" class="selected-panel hidden">
+              <div class="selected-version">
+                <div class="selected-version-header">
+                  <span>Selecionada</span>
+                  <button id="clear-selection" class="ghost icon-button small-icon-button" type="button" aria-label="Limpar selecao">
+                    ×
+                  </button>
+                </div>
+                <strong id="selected-version">-</strong>
+                <small id="selected-meta">Escolha uma versao</small>
+              </div>
+              <div id="play-actions" class="play-actions">
+                <button id="install-version" class="secondary big-button">
+                  Instalar
+                </button>
+                <button id="launch-version" class="primary big-button">
+                  Jogar
+                </button>
+              </div>
             </div>
             <div id="progress-box" class="progress-box idle">
               <div class="progress-header">
@@ -132,6 +152,11 @@
               <div class="progress-track">
                 <div id="progress-bar" class="progress-bar"></div>
               </div>
+            </div>
+            <div class="selected-tools">
+              <button id="uninstall-version" class="ghost small-button hidden" type="button">
+                Desinstalar
+              </button>
             </div>
             <div class="paths">
               <span>Instalacao</span>
@@ -181,6 +206,28 @@
         <div class="modal-actions">
           <button id="cancel-local-account" class="ghost" type="button">Cancelar</button>
           <button id="confirm-local-account" class="primary" type="button">Criar conta local</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="modpack-version-modal" class="modal-backdrop hidden" aria-hidden="true">
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="modpack-version-title">
+        <div class="modal-header">
+          <div>
+            <h3 id="modpack-version-title">Escolher versao do modpack</h3>
+            <p id="modpack-version-subtitle">Selecione qual versao voce quer baixar.</p>
+          </div>
+          <button id="close-modpack-version-modal" class="ghost icon-button" type="button" aria-label="Fechar modal">
+            ×
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <div id="modpack-version-list" class="modpack-version-list"></div>
+        </div>
+
+        <div class="modal-actions">
+          <button id="cancel-modpack-version" class="ghost" type="button">Cancelar</button>
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
 {
-  "name": "socioslauncher",
+  "name": "sociosclient",
   "version": "0.1.0",
   "description": "Launcher Minecraft Java original com login Microsoft e instalacao de versoes oficiais.",
   "main": "src/main.js",
@@ -25,8 +25,8 @@
     "electron-builder": "^26.0.0"
   },
   "build": {
-    "appId": "com.socioslauncher.app",
-    "productName": "SociosLauncher",
+    "appId": "com.sociosclient.app",
+    "productName": "Socios Client",
     "icon": "logosocios.png",
     "files": [
       "src/**/*",

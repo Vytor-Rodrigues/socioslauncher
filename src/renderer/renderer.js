@@ -2,17 +2,31 @@ const api = window.launcherApi;
 
 const state = {
   versions: [],
+  modpacks: [],
   latest: null,
   selected: null,
   account: null,
   settings: null,
   busy: false,
+  activeTab: "versions",
+  activeModpacksTab: "search",
+  modpacksLoading: false,
+  modpackQuery: "",
+  modpackTotalHits: 0,
+  modpackSearchTimer: null,
+  installingModpackId: null,
+  pendingModpack: null,
+  modpackVersions: [],
   progressMode: "idle",
   progressValue: 0,
   progressResetTimer: null,
 };
 
 const elements = {
+  navVersions: document.querySelector("#nav-versions"),
+  navModpacks: document.querySelector("#nav-modpacks"),
+  topbarTitle: document.querySelector("#topbar-title"),
+  browseMode: document.querySelector("#browse-mode"),
   accountStatus: document.querySelector("#account-status"),
   accountView: document.querySelector("#account-view"),
   addAccount: document.querySelector("#add-account"),
@@ -24,6 +38,12 @@ const elements = {
   confirmLocalAccount: document.querySelector("#confirm-local-account"),
   localAccountUsername: document.querySelector("#local-account-username"),
   localAccountHint: document.querySelector("#local-account-hint"),
+  modpackVersionModal: document.querySelector("#modpack-version-modal"),
+  closeModpackVersionModal: document.querySelector("#close-modpack-version-modal"),
+  cancelModpackVersion: document.querySelector("#cancel-modpack-version"),
+  modpackVersionTitle: document.querySelector("#modpack-version-title"),
+  modpackVersionSubtitle: document.querySelector("#modpack-version-subtitle"),
+  modpackVersionList: document.querySelector("#modpack-version-list"),
   minMemory: document.querySelector("#min-memory"),
   maxMemory: document.querySelector("#max-memory"),
   javaPath: document.querySelector("#java-path"),
@@ -33,11 +53,20 @@ const elements = {
   latestLine: document.querySelector("#latest-line"),
   versionFilter: document.querySelector("#version-filter"),
   refreshVersions: document.querySelector("#refresh-versions"),
+  modpackSubtabs: document.querySelector("#modpack-subtabs"),
+  modpacksSearchTab: document.querySelector("#modpacks-search-tab"),
+  modpacksDownloadedTab: document.querySelector("#modpacks-downloaded-tab"),
   versionSearch: document.querySelector("#version-search"),
+  launcherGrid: document.querySelector("#launcher-grid"),
+  playPanel: document.querySelector("#play-panel"),
   versionList: document.querySelector("#version-list"),
+  selectedPanel: document.querySelector("#selected-panel"),
+  clearSelection: document.querySelector("#clear-selection"),
+  playActions: document.querySelector("#play-actions"),
   selectedVersion: document.querySelector("#selected-version"),
   selectedMeta: document.querySelector("#selected-meta"),
   installVersion: document.querySelector("#install-version"),
+  uninstallVersion: document.querySelector("#uninstall-version"),
   launchVersion: document.querySelector("#launch-version"),
   progressBox: document.querySelector("#progress-box"),
   progressLabel: document.querySelector("#progress-label"),
@@ -69,33 +98,73 @@ function appendLog(type, message) {
 function setBusy(value) {
   state.busy = value;
   [
+    elements.navVersions,
+    elements.navModpacks,
+    elements.browseMode,
     elements.addAccount,
     elements.addLocalAccount,
     elements.removeAccount,
     elements.refreshVersions,
     elements.installVersion,
+    elements.uninstallVersion,
     elements.launchVersion,
-  ].forEach((button) => {
-    button.disabled = value;
-  });
+  ]
+    .filter(Boolean)
+    .forEach((button) => {
+      button.disabled = value;
+    });
 
   if (elements.confirmLocalAccount) {
     elements.confirmLocalAccount.disabled = value;
   }
 
+  if (elements.cancelModpackVersion) {
+    elements.cancelModpackVersion.disabled = value;
+  }
+
+  if (elements.closeModpackVersionModal) {
+    elements.closeModpackVersionModal.disabled = value;
+  }
+
   syncActionButtons();
+
+  if (
+    elements.modpackVersionModal &&
+    !elements.modpackVersionModal.classList.contains("hidden")
+  ) {
+    renderModpackVersionOptions();
+  }
 }
 
 function canInstallSelectedVersion() {
   return Boolean(state.selected && !state.selected.local && !state.selected.installed);
 }
 
+function canUninstallSelectedVersion() {
+  return Boolean(state.selected && (state.selected.installed || state.selected.local));
+}
+
+function clearSelectedVersion() {
+  if (state.busy) return;
+  state.selected = null;
+  renderSelected();
+  renderCatalog();
+}
+
 function syncActionButtons() {
   const hasSelection = Boolean(state.selected);
+  const canInstall = canInstallSelectedVersion();
 
-  elements.installVersion.hidden = !canInstallSelectedVersion();
-  elements.installVersion.disabled = state.busy || !canInstallSelectedVersion();
+  elements.launcherGrid.classList.toggle("no-selection", !hasSelection);
+  elements.playPanel.classList.toggle("hidden", !hasSelection);
+  elements.selectedPanel.classList.toggle("hidden", !hasSelection);
+  elements.installVersion.hidden = !canInstall;
+  elements.installVersion.disabled = state.busy || !canInstall;
+  elements.uninstallVersion.classList.toggle("hidden", !canUninstallSelectedVersion());
+  elements.uninstallVersion.disabled = state.busy || !canUninstallSelectedVersion();
   elements.launchVersion.disabled = state.busy || !hasSelection;
+  elements.clearSelection.disabled = state.busy || !hasSelection;
+  elements.playActions.classList.toggle("launch-only", hasSelection && !canInstall);
 }
 
 function validateLocalUsername(value) {
@@ -133,6 +202,77 @@ function openLocalAccountModal() {
 function closeLocalAccountModal() {
   elements.localAccountModal.classList.add("hidden");
   elements.localAccountModal.setAttribute("aria-hidden", "true");
+}
+
+function modpackLoaderLabel(loaderType) {
+  const normalized = String(loaderType || "vanilla").toLowerCase();
+  if (normalized === "vanilla") return "Vanilla";
+  if (normalized === "fabric") return "Fabric";
+  if (normalized === "forge") return "Forge";
+  return normalized;
+}
+
+function closeModpackVersionModal() {
+  state.pendingModpack = null;
+  state.modpackVersions = [];
+  elements.modpackVersionModal.classList.add("hidden");
+  elements.modpackVersionModal.setAttribute("aria-hidden", "true");
+  elements.modpackVersionList.innerHTML = "";
+}
+
+function openModpackVersionModal(modpack, versions) {
+  state.pendingModpack = modpack;
+  state.modpackVersions = Array.isArray(versions) ? versions : [];
+  elements.modpackVersionTitle.textContent = `Escolher versao de ${modpack.title}`;
+  elements.modpackVersionSubtitle.textContent = "Selecione qual versao voce quer baixar.";
+  elements.modpackVersionModal.classList.remove("hidden");
+  elements.modpackVersionModal.setAttribute("aria-hidden", "false");
+  renderModpackVersionOptions();
+  requestAnimationFrame(() => {
+    const firstButton = elements.modpackVersionList.querySelector("button");
+    if (firstButton) firstButton.focus();
+  });
+}
+
+function renderModpackVersionOptions() {
+  elements.modpackVersionList.innerHTML = "";
+
+  const fragment = document.createDocumentFragment();
+  state.modpackVersions.forEach((version) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "modpack-version-item";
+    button.disabled = state.busy;
+    button.innerHTML = `
+      <span class="modpack-version-copy">
+        <strong>${escapeHtml(version.name || version.versionNumber || version.id)}</strong>
+        <small>${escapeHtml(
+          [
+            version.versionNumber ? `Pack ${version.versionNumber}` : "",
+            version.minecraftVersion ? `MC ${version.minecraftVersion}` : "",
+            modpackLoaderLabel(version.loaderType),
+            version.publishedAt ? formatDate(version.publishedAt) : "",
+          ]
+            .filter(Boolean)
+            .join(" - ")
+        )}</small>
+      </span>
+      <span class="tag-row">
+        <span class="tag ${escapeHtml(String(version.loaderType || "vanilla").toLowerCase())}">${escapeHtml(
+          modpackLoaderLabel(version.loaderType)
+        )}</span>
+        ${
+          version.featured
+            ? '<span class="tag installed">destaque</span>'
+            : ""
+        }
+      </span>
+    `;
+    button.addEventListener("click", () => installModpack(state.pendingModpack, version.id));
+    fragment.appendChild(button);
+  });
+
+  elements.modpackVersionList.appendChild(fragment);
 }
 
 async function submitLocalAccount() {
@@ -230,19 +370,47 @@ function versionLabel(version) {
     fabric: "fabric",
     forge: "forge",
     optifine: "optifine",
+    modpack: "modpack",
     custom: "custom",
     local: "local",
   };
   return map[version.type] || version.type || "release";
 }
 
+function versionDisplayName(version) {
+  return version?.modpackTitle || version?.id || "-";
+}
+
+function isDownloadedModpack(version) {
+  return Boolean(version && (version.type === "modpack" || version.modpackProjectId || version.modpackTitle));
+}
+
+function downloadedModpacks() {
+  return state.versions
+    .filter((version) => isDownloadedModpack(version) && (version.installed || version.local))
+    .sort(compareVersions);
+}
+
 function versionDescription(version) {
   const parts = [versionLabel(version)];
+  if (version.modpackVersionNumber) parts.push(`pack ${version.modpackVersionNumber}`);
   if (version.minecraftVersion) parts.push(`MC ${version.minecraftVersion}`);
-  if (version.loaderVersion) parts.push(version.loaderVersion);
+  if (version.loaderType && version.loaderType !== "vanilla") {
+    parts.push(
+      version.loaderVersion
+        ? `${version.loaderType} ${version.loaderVersion}`
+        : version.loaderType
+    );
+  }
+  if (version.loaderVersion && (!version.loaderType || version.loaderType === "vanilla")) {
+    parts.push(version.loaderVersion);
+  }
   if (version.releaseTime) parts.push(formatDate(version.releaseTime));
   if (version.local) parts.push("local");
   if (version.installed) parts.push("instalada");
+  if (version.modpackTitle && version.id && version.modpackTitle !== version.id) {
+    parts.push(version.id);
+  }
   return parts.join(" - ");
 }
 
@@ -304,12 +472,18 @@ function filteredVersions() {
   const query = elements.versionSearch.value.trim().toLowerCase();
   const filter = elements.versionFilter.value;
   return state.versions
+    .filter((version) => !isDownloadedModpack(version))
     .filter((version) => {
       if (filter === "all") return true;
       if (filter === "installed") return version.installed || version.local;
       return version.type === filter;
     })
-    .filter((version) => !query || version.id.toLowerCase().includes(query))
+    .filter(
+      (version) =>
+        !query ||
+        version.id.toLowerCase().includes(query) ||
+        String(version.modpackTitle || "").toLowerCase().includes(query)
+    )
     .sort(compareVersions)
     .slice(0, 260);
 }
@@ -336,8 +510,12 @@ function renderVersions() {
     button.type = "button";
     button.innerHTML = `
       <span class="version-main">
-        <strong>${escapeHtml(version.id)}</strong>
-        <small>${formatDate(version.releaseTime)}</small>
+        <strong>${escapeHtml(versionDisplayName(version))}</strong>
+        <small>${
+          version.modpackTitle && version.modpackTitle !== version.id
+            ? escapeHtml(version.id)
+            : formatDate(version.releaseTime)
+        }</small>
       </span>
       <span class="tag-row">
         <span class="tag ${version.type}">${escapeHtml(versionLabel(version))}</span>
@@ -356,6 +534,144 @@ function renderVersions() {
   elements.versionList.appendChild(fragment);
 }
 
+function formatCompactNumber(value) {
+  return new Intl.NumberFormat("pt-BR", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(Number(value) || 0);
+}
+
+function renderDownloadedModpacks() {
+  const modpacks = downloadedModpacks();
+  elements.versionList.innerHTML = "";
+
+  if (!modpacks.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "Nenhum modpack baixado ainda";
+    elements.versionList.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  modpacks.forEach((version) => {
+    const button = document.createElement("button");
+    button.className = "version-item";
+    if (state.selected && state.selected.id === version.id) {
+      button.classList.add("selected");
+    }
+    button.type = "button";
+    button.innerHTML = `
+      <span class="version-main">
+        <strong>${escapeHtml(versionDisplayName(version))}</strong>
+        <small>${escapeHtml(
+          [
+            version.modpackVersionNumber ? `Pack ${version.modpackVersionNumber}` : "",
+            version.minecraftVersion ? `MC ${version.minecraftVersion}` : "",
+            version.id,
+          ]
+            .filter(Boolean)
+            .join(" - ")
+        )}</small>
+      </span>
+      <span class="tag-row">
+        <span class="tag modpack">modpack</span>
+        ${version.installed ? '<span class="tag installed">instalada</span>' : ""}
+      </span>
+    `;
+    button.addEventListener("click", () => {
+      state.selected = version;
+      renderSelected();
+      renderCatalog();
+    });
+    fragment.appendChild(button);
+  });
+
+  elements.versionList.appendChild(fragment);
+}
+
+function renderModpacks() {
+  if (state.activeModpacksTab === "downloaded") {
+    renderDownloadedModpacks();
+    return;
+  }
+
+  elements.versionList.innerHTML = "";
+
+  if (state.modpacksLoading) {
+    const loading = document.createElement("div");
+    loading.className = "empty-state";
+    loading.textContent = "Buscando modpacks no Modrinth...";
+    elements.versionList.appendChild(loading);
+    return;
+  }
+
+  if (!state.modpacks.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = state.modpackQuery
+      ? "Nenhum modpack encontrado"
+      : "Pesquise ou atualize para listar modpacks do Modrinth";
+    elements.versionList.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  state.modpacks.forEach((modpack) => {
+    const card = document.createElement("article");
+    card.className = "modpack-item";
+
+    const gameVersions = (modpack.gameVersions || []).slice(0, 3).join(", ");
+    const categories = (modpack.categories || []).slice(0, 4);
+    const button = document.createElement("button");
+    button.className = "secondary";
+    button.type = "button";
+    button.textContent =
+      state.installingModpackId === modpack.projectId ? "Baixando..." : "Baixar";
+    button.disabled = state.busy || state.installingModpackId === modpack.projectId;
+    button.addEventListener("click", () => startModpackInstall(modpack));
+
+    card.innerHTML = `
+      ${
+        modpack.iconUrl
+          ? `<img class="modpack-icon" src="${escapeHtml(modpack.iconUrl)}" alt="" />`
+          : '<div class="modpack-icon-placeholder">M</div>'
+      }
+      <div class="modpack-copy">
+        <strong>${escapeHtml(modpack.title)}</strong>
+        <small>${escapeHtml(modpack.author ? `por ${modpack.author}` : modpack.slug)}</small>
+        <p>${escapeHtml(modpack.description || "Sem descricao.")}</p>
+        <div class="tag-row modpack-tags">
+          ${gameVersions ? `<span class="tag release">${escapeHtml(gameVersions)}</span>` : ""}
+          ${categories.map((category) => `<span class="tag local">${escapeHtml(category)}</span>`).join("")}
+        </div>
+      </div>
+      <div class="modpack-actions"></div>
+    `;
+
+    const actions = card.querySelector(".modpack-actions");
+    actions.appendChild(button);
+
+    const stats = document.createElement("small");
+    stats.textContent = `${formatCompactNumber(modpack.downloads)} downloads`;
+    actions.appendChild(stats);
+
+    fragment.appendChild(card);
+  });
+
+  elements.versionList.appendChild(fragment);
+}
+
+function renderCatalog() {
+  if (state.activeTab === "modpacks") {
+    renderModpacks();
+    return;
+  }
+
+  renderVersions();
+}
+
 function renderSelected() {
   if (!state.selected) {
     elements.selectedVersion.textContent = "-";
@@ -364,17 +680,182 @@ function renderSelected() {
     return;
   }
 
-  elements.selectedVersion.textContent = state.selected.id;
+  elements.selectedVersion.textContent = versionDisplayName(state.selected);
   elements.selectedMeta.textContent = versionDescription(state.selected);
   syncActionButtons();
 }
 
 function renderLatest() {
-  if (!state.latest) {
-    elements.latestLine.textContent = "Manifesto nao carregado";
+  if (state.activeTab === "modpacks") {
+    elements.topbarTitle.textContent = "Modpacks";
+    if (state.activeModpacksTab === "downloaded") {
+      const total = downloadedModpacks().length;
+      elements.latestLine.textContent = total
+        ? `${total} modpacks baixados`
+        : "Seus modpacks instalados aparecem aqui.";
+    } else if (state.modpacksLoading) {
+      elements.latestLine.textContent = "Buscando catalogo do Modrinth...";
+    } else if (state.modpacks.length) {
+      elements.latestLine.textContent = `${state.modpackTotalHits || state.modpacks.length} modpacks encontrados`;
+    } else {
+      elements.latestLine.textContent = "Pesquise modpacks do Modrinth para baixar.";
+    }
+    elements.versionFilter.classList.add("hidden");
+    elements.modpackSubtabs.classList.remove("hidden");
+    elements.modpacksSearchTab.classList.toggle("active", state.activeModpacksTab === "search");
+    elements.modpacksDownloadedTab.classList.toggle(
+      "active",
+      state.activeModpacksTab === "downloaded"
+    );
+    elements.refreshVersions.textContent =
+      state.activeModpacksTab === "search" ? "Buscar" : "Atualizar";
+    elements.versionSearch.placeholder = "Buscar modpack no Modrinth";
+    elements.versionSearch.parentElement.classList.toggle(
+      "hidden",
+      state.activeModpacksTab !== "search"
+    );
     return;
   }
-  elements.latestLine.textContent = `Latest release ${state.latest.release} / snapshot ${state.latest.snapshot}`;
+
+  elements.topbarTitle.textContent = "Versoes";
+  if (!state.latest) {
+    elements.latestLine.textContent = "Manifesto nao carregado";
+  } else {
+    elements.latestLine.textContent = `Latest release ${state.latest.release} / snapshot ${state.latest.snapshot}`;
+  }
+  elements.versionFilter.classList.remove("hidden");
+  elements.modpackSubtabs.classList.add("hidden");
+  elements.versionSearch.parentElement.classList.remove("hidden");
+  elements.refreshVersions.textContent = "Atualizar";
+  elements.versionSearch.placeholder = "Buscar versao";
+}
+
+function clearModpackSearchTimer() {
+  if (state.modpackSearchTimer) {
+    clearTimeout(state.modpackSearchTimer);
+    state.modpackSearchTimer = null;
+  }
+}
+
+async function refreshModpacks(query = state.modpackQuery) {
+  state.modpacksLoading = true;
+  state.modpackQuery = String(query || "").trim();
+  renderLatest();
+  renderCatalog();
+
+  try {
+    const result = await api.searchModpacks(state.modpackQuery);
+    state.modpacks = result.hits || [];
+    state.modpackTotalHits = result.totalHits || state.modpacks.length;
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+    state.modpacks = [];
+    state.modpackTotalHits = 0;
+  } finally {
+    state.modpacksLoading = false;
+    renderLatest();
+    renderCatalog();
+  }
+}
+
+function queueModpackSearch() {
+  clearModpackSearchTimer();
+  state.modpackSearchTimer = setTimeout(() => {
+    refreshModpacks(elements.versionSearch.value);
+  }, 320);
+}
+
+function setActiveModpacksTab(tab) {
+  if (state.activeModpacksTab === tab) return;
+  state.activeModpacksTab = tab;
+  if (tab === "search" && !state.modpacks.length && !state.modpacksLoading) {
+    refreshModpacks(state.modpackQuery);
+  }
+  renderLatest();
+  renderCatalog();
+}
+
+function setActiveTab(tab) {
+  if (state.activeTab === tab) return;
+
+  state.activeTab = tab;
+  if (elements.browseMode) {
+    elements.browseMode.value = tab;
+  }
+  if (elements.navVersions) {
+    elements.navVersions.classList.toggle("active", tab === "versions");
+  }
+  if (elements.navModpacks) {
+    elements.navModpacks.classList.toggle("active", tab === "modpacks");
+  }
+
+  if (tab === "versions") {
+    clearModpackSearchTimer();
+    elements.versionSearch.value = "";
+  } else {
+    elements.versionSearch.value = state.modpackQuery;
+    if (state.activeModpacksTab === "search" && !state.modpacks.length && !state.modpacksLoading) {
+      refreshModpacks(state.modpackQuery);
+    }
+  }
+
+  renderLatest();
+  renderCatalog();
+  renderSelected();
+}
+
+async function startModpackInstall(modpack) {
+  if (!modpack?.projectId) return;
+
+  state.installingModpackId = modpack.projectId;
+  setBusy(true);
+  renderCatalog();
+
+  try {
+    const versions = await api.getModpackVersions(modpack.projectId);
+    if (versions.length <= 1) {
+      await installModpackVersion(modpack, versions[0]?.id || null);
+      return;
+    }
+
+    openModpackVersionModal(modpack, versions);
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.installingModpackId = null;
+    setBusy(false);
+    renderCatalog();
+  }
+}
+
+async function installModpackVersion(modpack, versionId = null) {
+  if (!modpack?.projectId) return;
+
+  state.installingModpackId = modpack.projectId;
+  setBusy(true);
+  renderCatalog();
+
+  try {
+    closeModpackVersionModal();
+    const result = await api.installModpack({ ...modpack, versionId });
+    const data = await api.refreshVersions();
+    state.versions = data.versions;
+    state.latest = data.latest;
+    state.selected =
+      state.versions.find((version) => version.id === result.versionId) || state.selected;
+    state.activeModpacksTab = "downloaded";
+    setActiveTab("modpacks");
+    renderLatest();
+    renderSelected();
+    renderCatalog();
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.installingModpackId = null;
+    setBusy(false);
+    renderCatalog();
+    renderAccount();
+  }
 }
 
 function cancelProgressReset() {
@@ -515,6 +996,7 @@ function handleLauncherEvent(event) {
 async function refreshState(forceVersions = false) {
   try {
     setBusy(true);
+    const previousSelectionId = state.selected?.id || null;
     const data = await api.getState();
     const manifest = forceVersions ? await api.refreshVersions() : data.versions;
     state.account = data.account;
@@ -523,14 +1005,11 @@ async function refreshState(forceVersions = false) {
     state.latest = manifest.latest;
     applySettings(data.settings);
     elements.minecraftPath.textContent = data.paths.minecraft;
-    state.selected =
-      state.versions.find((version) => version.id === state.latest.release) ||
-      state.versions[0] ||
-      null;
+    state.selected = state.versions.find((version) => version.id === previousSelectionId) || null;
     renderAccount();
     renderLatest();
     renderSelected();
-    renderVersions();
+    renderCatalog();
     clearProgress();
   } catch (error) {
     appendLog("error", error.message || String(error));
@@ -585,6 +1064,39 @@ async function runAction(action) {
   }
 }
 
+async function uninstallSelectedVersion() {
+  if (!state.selected || !canUninstallSelectedVersion()) {
+    appendLog("error", "Selecione uma versao instalada para desinstalar.");
+    return;
+  }
+
+  const selectedVersion = state.selected;
+  const selectedName = versionDisplayName(selectedVersion);
+  const confirmed = window.confirm(
+    `Desinstalar ${selectedName}?${
+      selectedVersion.modpackTitle ? " Isso tambem remove os arquivos da instancia." : ""
+    }`
+  );
+  if (!confirmed) return;
+
+  setBusy(true);
+  try {
+    await api.uninstallVersion({ id: selectedVersion.id });
+    const data = await api.refreshVersions();
+    state.versions = data.versions;
+    state.latest = data.latest;
+    state.selected = null;
+    renderLatest();
+    renderSelected();
+    renderCatalog();
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  } finally {
+    setBusy(false);
+    renderAccount();
+  }
+}
+
 elements.addAccount.addEventListener("click", async () => {
   setBusy(true);
   try {
@@ -618,12 +1130,25 @@ elements.localAccountModal.addEventListener("click", (event) => {
     closeLocalAccountModal();
   }
 });
+elements.closeModpackVersionModal.addEventListener("click", closeModpackVersionModal);
+elements.cancelModpackVersion.addEventListener("click", closeModpackVersionModal);
+elements.modpackVersionModal.addEventListener("click", (event) => {
+  if (event.target === elements.modpackVersionModal && !state.busy) {
+    closeModpackVersionModal();
+  }
+});
 
 document.addEventListener("keydown", (event) => {
-  if (
-    event.key === "Escape" &&
-    !elements.localAccountModal.classList.contains("hidden")
-  ) {
+  if (event.key !== "Escape") {
+    return;
+  }
+
+  if (!elements.modpackVersionModal.classList.contains("hidden") && !state.busy) {
+    closeModpackVersionModal();
+    return;
+  }
+
+  if (!elements.localAccountModal.classList.contains("hidden")) {
     closeLocalAccountModal();
   }
 });
@@ -643,13 +1168,35 @@ elements.removeAccount.addEventListener("click", async () => {
 });
 
 elements.refreshVersions.addEventListener("click", async () => {
+  if (state.activeTab === "modpacks") {
+    if (state.activeModpacksTab === "search") {
+      refreshModpacks(elements.versionSearch.value);
+      return;
+    }
+
+    try {
+      setBusy(true);
+      const data = await api.refreshVersions();
+      state.versions = data.versions;
+      state.latest = data.latest;
+      renderLatest();
+      renderCatalog();
+    } catch (error) {
+      appendLog("error", error.message || String(error));
+    } finally {
+      setBusy(false);
+      renderAccount();
+    }
+    return;
+  }
+
   try {
     setBusy(true);
     const data = await api.refreshVersions();
     state.versions = data.versions;
     state.latest = data.latest;
     renderLatest();
-    renderVersions();
+    renderCatalog();
     appendLog("success", "Manifesto atualizado.");
   } catch (error) {
     appendLog("error", error.message || String(error));
@@ -661,12 +1208,24 @@ elements.refreshVersions.addEventListener("click", async () => {
 
 elements.versionFilter.addEventListener("change", () => {
   saveSettingsQuietly();
-  renderVersions();
+  renderCatalog();
 });
 
-elements.versionSearch.addEventListener("input", renderVersions);
+elements.versionSearch.addEventListener("input", () => {
+  if (state.activeTab === "modpacks" && state.activeModpacksTab === "search") {
+    state.modpackQuery = elements.versionSearch.value.trim();
+    queueModpackSearch();
+    return;
+  }
+
+  renderCatalog();
+});
+elements.modpacksSearchTab.addEventListener("click", () => setActiveModpacksTab("search"));
+elements.modpacksDownloadedTab.addEventListener("click", () => setActiveModpacksTab("downloaded"));
 elements.installVersion.addEventListener("click", () => runAction("install"));
+elements.uninstallVersion.addEventListener("click", uninstallSelectedVersion);
 elements.launchVersion.addEventListener("click", () => runAction("launch"));
+elements.clearSelection.addEventListener("click", clearSelectedVersion);
 elements.openFolder.addEventListener("click", () => api.openMinecraftFolder());
 elements.clearLog.addEventListener("click", () => {
   elements.logOutput.textContent = "";
@@ -684,6 +1243,18 @@ elements.java8Path.addEventListener("change", saveSettingsQuietly);
 ].forEach((input) => {
   input.addEventListener("change", saveSettingsQuietly);
 });
+
+if (elements.navVersions) {
+  elements.navVersions.addEventListener("click", () => setActiveTab("versions"));
+}
+if (elements.navModpacks) {
+  elements.navModpacks.addEventListener("click", () => setActiveTab("modpacks"));
+}
+if (elements.browseMode) {
+  elements.browseMode.addEventListener("change", () => {
+    setActiveTab(elements.browseMode.value === "modpacks" ? "modpacks" : "versions");
+  });
+}
 
 api.onEvent(handleLauncherEvent);
 refreshState();
