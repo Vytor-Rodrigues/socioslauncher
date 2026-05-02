@@ -1,4 +1,4 @@
-# Socios MC Launcher
+# Socios Client
 
 Launcher desktop basico para Minecraft Java Edition original, feito em Electron.
 Ele lista versoes oficiais, vincula uma conta Microsoft/Minecraft e instala/abre
@@ -34,7 +34,7 @@ O instalador Windows sera gerado em `release/`.
 
 ## Dados locais
 
-O launcher salva dados em `AppData/Roaming/Nexus MC Launcher`:
+O client salva dados em `AppData/Roaming/Socios Client`:
 
 - `account.json`: refresh token Microsoft e perfil publico do Minecraft.
 - `settings.json`: memoria, Java e preferencias da UI.
@@ -42,7 +42,7 @@ O launcher salva dados em `AppData/Roaming/Nexus MC Launcher`:
   `AppData/Roaming/.minecraft`.
 - Versoes instaladas em `.minecraft/versions` aparecem no launcher, incluindo
   versoes locais como Fabric, OptiFine e modpacks que tenham JSON de versao.
-- `cache/`: cache de manifestos usados pelo launcher.
+- `cache/`: cache de manifestos usados pelo client.
 
 Para um produto final, troque o armazenamento simples de `account.json` por
 Keychain/Credential Manager/DPAPI ou outro cofre do sistema operacional.
