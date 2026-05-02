@@ -268,7 +268,7 @@ function renderModpackVersionOptions() {
         }
       </span>
     `;
-    button.addEventListener("click", () => installModpack(state.pendingModpack, version.id));
+    button.addEventListener("click", () => installModpackVersion(state.pendingModpack, version.id));
     fragment.appendChild(button);
   });
 
