@@ -17,6 +17,18 @@ const LAUNCHER_VERSION = "0.1.0";
 const HTTP_USER_AGENT = `${LAUNCHER_NAME}/${LAUNCHER_VERSION}`;
 const SETTINGS_SCHEMA_VERSION = 3;
 const REMOTE_GAME_VERSION_LIMIT = 36;
+const BROKEN_MODPACK_VERSION_RULES = [
+  {
+    projectId: "KmiWHzQ4",
+    versionNumbers: ["1.2.0"],
+    minecraftVersions: ["1.18.1"],
+    loaderTypes: ["fabric"],
+    projectName: "Skyblocker Modpack",
+    recommendedVersion: "1.3.0 ou superior",
+    reason:
+      "A versao 1.2.0 publicada no Modrinth e conhecida por quebrar na inicializacao do jogo.",
+  },
+];
 
 let mainWindow;
 let busy = false;
@@ -1560,6 +1572,89 @@ function supportedModpackDependencyInfo(info) {
   return Boolean(info?.minecraftVersion) && (!info.loaderType || ["fabric", "forge"].includes(info.loaderType));
 }
 
+function normalizeModpackVersionNumber(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^v(?=\d)/, "");
+}
+
+function modpackProjectIdFromVersion(version) {
+  return String(
+    version?.project_id || version?.projectId || version?.modpackProjectId || ""
+  ).trim();
+}
+
+function modpackVersionNumberFromVersion(version) {
+  return normalizeModpackVersionNumber(
+    version?.version_number || version?.modpackVersionNumber || version?.name || ""
+  );
+}
+
+function brokenModpackRule(version, dependencyInfo = null) {
+  const projectId = modpackProjectIdFromVersion(version);
+  if (!projectId) return null;
+
+  const versionNumber = modpackVersionNumberFromVersion(version);
+  const minecraftVersion = String(
+    dependencyInfo?.minecraftVersion || version?.minecraftVersion || ""
+  ).trim();
+  const loaderType = String(
+    dependencyInfo?.loaderType || version?.loaderType || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  return (
+    BROKEN_MODPACK_VERSION_RULES.find((rule) => {
+      if (rule.projectId !== projectId) return false;
+      if (
+        Array.isArray(rule.versionNumbers) &&
+        rule.versionNumbers.length &&
+        !rule.versionNumbers.some((value) => normalizeModpackVersionNumber(value) === versionNumber)
+      ) {
+        return false;
+      }
+      if (
+        Array.isArray(rule.minecraftVersions) &&
+        rule.minecraftVersions.length &&
+        !rule.minecraftVersions.includes(minecraftVersion)
+      ) {
+        return false;
+      }
+      if (
+        Array.isArray(rule.loaderTypes) &&
+        rule.loaderTypes.length &&
+        !rule.loaderTypes.includes(loaderType)
+      ) {
+        return false;
+      }
+      return true;
+    }) || null
+  );
+}
+
+function brokenModpackVersionMessage(version, dependencyInfo = null, action = "usar") {
+  const rule = brokenModpackRule(version, dependencyInfo);
+  if (!rule) return "";
+
+  const projectName = rule.projectName || version?.modpackTitle || version?.title || "Este modpack";
+  const versionNumber =
+    version?.modpackVersionNumber || version?.version_number || version?.name || "esta versao";
+  const recommendation = rule.recommendedVersion
+    ? ` Instale ${rule.recommendedVersion}.`
+    : "";
+
+  return `${projectName} ${versionNumber} nao pode ser ${action}. ${rule.reason}${recommendation}`;
+}
+
+function ensureModpackVersionAllowed(version, dependencyInfo = null, action = "usar") {
+  const message = brokenModpackVersionMessage(version, dependencyInfo, action);
+  if (message) {
+    throw new Error(message);
+  }
+}
+
 function supportedModpackError(info) {
   if (!info?.minecraftVersion) {
     return "O modpack nao informa a versao base do Minecraft.";
@@ -1588,6 +1683,12 @@ function selectSupportedModpackVersion(versions) {
       continue;
     }
 
+    const blockedMessage = brokenModpackVersionMessage(version, info, "instalada");
+    if (blockedMessage) {
+      fallbackError = blockedMessage;
+      continue;
+    }
+
     return { version, file, dependencyInfo: info };
   }
 
@@ -1602,6 +1703,10 @@ function compatibleModpackVersions(versions) {
     const info = modpackVersionInfo(version);
 
     if (!file?.url || !supportedModpackDependencyInfo(info)) {
+      continue;
+    }
+
+    if (brokenModpackRule(version, info)) {
       continue;
     }
 
@@ -1639,6 +1744,8 @@ function selectModpackVersionById(versions, versionId) {
   if (!file?.url || !supportedModpackDependencyInfo(info)) {
     throw new Error(supportedModpackError(info));
   }
+
+  ensureModpackVersionAllowed(selectedVersion, info, "instalada");
 
   return { version: selectedVersion, file, dependencyInfo: info };
 }
@@ -1870,6 +1977,8 @@ async function installModpack(payload) {
     if (!supportedModpackDependencyInfo(versionInfo)) {
       throw new Error(supportedModpackError(versionInfo));
     }
+
+    ensureModpackVersionAllowed(selected.version, versionInfo, "instalada");
 
     const modpackId = modpackInstallVersionId(payload, selected.version);
     const versionDir = versionDirectory(modpackId);
@@ -3299,6 +3408,15 @@ async function runMinecraft(mode, input) {
   if (!input || !input.version || !input.version.id) {
     throw new Error("Selecione uma versao do Minecraft.");
   }
+
+  ensureModpackVersionAllowed(
+    input.version,
+    {
+      minecraftVersion: input.version.minecraftVersion,
+      loaderType: input.version.loaderType,
+    },
+    mode === "install" ? "instalada" : "iniciada"
+  );
 
   busy = true;
   sendEvent(

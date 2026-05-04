@@ -524,6 +524,11 @@ select:focus {
   background: #232923;
 }
 
+.modpack-item.selected {
+  border-color: var(--green);
+  background: #213128;
+}
+
 .modpack-icon,
 .modpack-icon-placeholder {
   width: 56px;
