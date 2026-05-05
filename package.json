@@ -18,7 +18,8 @@
   "dependencies": {
     "adm-zip": "^0.5.17",
     "minecraft-launcher-core": "^3.18.2",
-    "msmc": "^5.0.5"
+    "msmc": "^5.0.5",
+    "skinview3d": "^3.4.2"
   },
   "devDependencies": {
     "electron": "^36.0.0",
