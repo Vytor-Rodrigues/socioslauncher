@@ -418,7 +418,7 @@
     </div>
 
     <div id="accounts-modal" class="modal-backdrop hidden" aria-hidden="true">
-      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true">
+      <div class="modal-card modal-card-wide accounts-modal-card" role="dialog" aria-modal="true">
         <div class="modal-header">
           <div>
             <h3>Gerenciar contas</h3>
@@ -427,12 +427,75 @@
           <button id="close-accounts-modal" class="ghost icon-button" type="button">×</button>
         </div>
 
-        <div class="modal-body" style="min-height: 150px; max-height: 400px; overflow-y: auto;">
-          <div id="accounts-list" style="display: flex; flex-direction: column; gap: 8px;"></div>
+        <div class="modal-body accounts-modal-body">
+          <div class="accounts-layout">
+            <div id="accounts-list" class="accounts-list"></div>
+
+            <section id="account-skin-panel" class="account-skin-panel hidden">
+              <div class="account-skin-panel-header">
+                <div>
+                  <h4 id="account-skin-panel-title">Trocar skin</h4>
+                  <p id="account-skin-panel-subtitle">Clique na imagem da conta para abrir o editor.</p>
+                </div>
+                <button
+                  id="close-account-skin-panel"
+                  class="ghost icon-button small-icon-button"
+                  type="button"
+                  aria-label="Fechar editor de skin"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div class="account-skin-preview-row">
+                <div class="account-skin-preview-card">
+                  <img id="account-skin-preview" class="account-skin-preview" alt="Preview da skin" />
+                </div>
+                <div class="account-skin-copy">
+                  <p id="account-skin-status" class="modal-hint">Use um PNG proprio ou escolha uma skin pronta da Crafty.</p>
+                  <p id="account-skin-hint" class="modal-hint"></p>
+                </div>
+              </div>
+
+              <div class="skin-upload-row">
+                <button id="account-skin-upload-btn" class="secondary" type="button">Enviar PNG</button>
+                <label class="skin-variant-field">
+                  Modelo
+                  <select id="account-skin-variant">
+                    <option value="classic">Classic</option>
+                    <option value="slim">Slim</option>
+                  </select>
+                </label>
+                <button id="reload-crafty-skins" class="ghost" type="button">Atualizar Crafty</button>
+              </div>
+
+              <input id="account-skin-file" class="hidden" type="file" accept="image/png" />
+
+              <div class="account-skin-section">
+                <div class="crafty-skins-toolbar">
+                  <div class="account-skin-section-title">
+                    <span>Crafty Skin Service</span>
+                    <small>Galeria publica para aplicar uma skin pronta.</small>
+                  </div>
+                  <label class="crafty-skin-search-field">
+                    Pesquisar
+                    <input
+                      id="crafty-skin-search"
+                      type="search"
+                      autocomplete="off"
+                      placeholder="Digite o nome da skin"
+                    />
+                  </label>
+                </div>
+                <div id="crafty-skins-list" class="crafty-skins-list"></div>
+                <div id="crafty-skins-pagination" class="crafty-skins-pagination hidden"></div>
+              </div>
+            </section>
+          </div>
         </div>
 
-        <div class="modal-actions" style="justify-content: space-between;">
-          <div style="display: flex; gap: 8px;">
+        <div class="modal-actions accounts-modal-actions">
+          <div class="accounts-modal-primary-actions">
             <button id="add-account" class="primary">Microsoft</button>
             <button id="add-local-account-btn" class="secondary">Conta local</button>
           </div>
@@ -441,6 +504,15 @@
       </div>
     </div>
 
+    <div id="crafty-skin-hover-popup" class="crafty-skin-hover-popup hidden" aria-hidden="true">
+      <div class="crafty-skin-hover-copy">
+        <strong id="crafty-skin-hover-title">Preview 3D</strong>
+        <small id="crafty-skin-hover-meta"></small>
+      </div>
+      <canvas id="crafty-skin-hover-canvas" class="crafty-skin-hover-canvas" width="260" height="320"></canvas>
+    </div>
+
+    <script src="../../node_modules/skinview3d/bundles/skinview3d.bundle.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

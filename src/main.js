@@ -1,8 +1,11 @@
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, nativeImage } = require("electron");
 const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
+const http = require("http");
+const https = require("https");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const AdmZip = require("adm-zip");
 const { Client } = require("minecraft-launcher-core");
 const { Auth } = require("msmc");
@@ -12,11 +15,26 @@ const VERSION_MANIFEST_URL =
 const FABRIC_META_ROOT = "https://meta.fabricmc.net/v2/versions/loader";
 const BMCL_API_ROOT = "https://bmclapi2.bangbang93.com";
 const MODRINTH_API_ROOT = "https://api.modrinth.com/v2";
+const CRAFTY_SKINS_URL = "https://crafty.gg/skins";
+const AUTHLIB_INJECTOR_VERSION = "1.2.7";
+const AUTHLIB_INJECTOR_BUILD = "55";
+const AUTHLIB_INJECTOR_FILE_NAME = `authlib-injector-${AUTHLIB_INJECTOR_VERSION}.jar`;
+const AUTHLIB_INJECTOR_DOWNLOAD_URL =
+  `https://authlib-injector.yushi.moe/artifact/${AUTHLIB_INJECTOR_BUILD}/${AUTHLIB_INJECTOR_FILE_NAME}`;
 const LAUNCHER_NAME = "Socios Client";
 const LAUNCHER_VERSION = "0.1.0";
 const HTTP_USER_AGENT = `${LAUNCHER_NAME}/${LAUNCHER_VERSION}`;
+const LEGACY_JAVA_RUNTIME_DOWNLOADS = {
+  win32: {
+    x64: "https://api.adoptium.net/v3/binary/latest/8/ga/windows/x64/jre/hotspot/normal/eclipse",
+    arm64:
+      "https://api.adoptium.net/v3/binary/latest/8/ga/windows/aarch64/jre/hotspot/normal/eclipse",
+  },
+};
 const SETTINGS_SCHEMA_VERSION = 3;
 const REMOTE_GAME_VERSION_LIMIT = 36;
+const MAX_ACCOUNT_SKIN_BYTES = 2 * 1024 * 1024;
+const ACCOUNT_SKIN_PREVIEW_SIZE = 8;
 const BROKEN_MODPACK_VERSION_RULES = [
   {
     projectId: "KmiWHzQ4",
@@ -38,6 +56,7 @@ let activeProcess = null;
 let activeIdleGuard = null;
 let activeLaunchContext = null;
 let globalDownloadTracker = null;
+let localSkinSignatureKeys = null;
 
 class InstallOnlyClient extends Client {
   startMinecraft() {
@@ -70,6 +89,32 @@ function remoteCatalogCachePath(name) {
 
 function installerCachePath(loader, id, fileName) {
   return userDataPath("cache", "installers", loader, id, fileName);
+}
+
+function runtimeCachePath(component, fileName) {
+  return userDataPath("cache", "runtime", component, fileName);
+}
+
+function authlibInjectorJarPath() {
+  return runtimeCachePath("authlib-injector", AUTHLIB_INJECTOR_FILE_NAME);
+}
+
+function craftySkinsCachePath(searchQuery = "") {
+  const normalizedQuery = String(searchQuery || "").trim().toLowerCase();
+  if (!normalizedQuery) {
+    return userDataPath("cache", "crafty-skins.json");
+  }
+
+  const queryHash = crypto.createHash("sha1").update(normalizedQuery).digest("hex");
+  return userDataPath("cache", "crafty-skins", `${queryHash}.json`);
+}
+
+function accountSkinTexturePath(accountId) {
+  return userDataPath("skins", "textures", `${sanitizeFileName(accountId)}.png`);
+}
+
+function accountSkinPreviewPath(accountId) {
+  return userDataPath("skins", "previews", `${sanitizeFileName(accountId)}.png`);
 }
 
 function modpackArchiveCachePath(projectId, versionId, fileName) {
@@ -196,31 +241,56 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, number));
 }
 
+function runtimeComponentDirectory(component) {
+  return path.join(minecraftRoot(), "runtime", component, "windows");
+}
+
+function javaExecutableCandidates(javaPath) {
+  const normalized = String(javaPath || "").trim();
+  if (!normalized) return [];
+
+  const candidates = [normalized];
+  if (/javaw\.exe$/i.test(normalized)) {
+    candidates.unshift(normalized.replace(/javaw\.exe$/i, "java.exe"));
+  }
+  if (/java\.exe$/i.test(normalized)) {
+    candidates.push(normalized.replace(/java\.exe$/i, "javaw.exe"));
+  }
+
+  return [...new Set(candidates)];
+}
+
+function findJavaHome(directory, maxDepth = 4) {
+  if (!directory || maxDepth < 0 || !fs.existsSync(directory)) return "";
+
+  if (
+    fs.existsSync(path.join(directory, "bin", "java.exe")) ||
+    fs.existsSync(path.join(directory, "bin", "javaw.exe"))
+  ) {
+    return directory;
+  }
+
+  for (const entry of safeReadDirectory(directory)) {
+    if (!entry.isDirectory()) continue;
+
+    const found = findJavaHome(path.join(directory, entry.name), maxDepth - 1);
+    if (found) return found;
+  }
+
+  return "";
+}
+
 function bundledJavaPath(component) {
   if (!component) return "";
 
+  const runtimeRoot = runtimeComponentDirectory(component);
   const candidates = [
-    path.join(
-      minecraftRoot(),
-      "runtime",
-      component,
-      "windows",
-      component,
-      "bin",
-      "java.exe"
-    ),
-    path.join(
-      minecraftRoot(),
-      "runtime",
-      component,
-      "windows",
-      component,
-      "bin",
-      "javaw.exe"
-    ),
+    path.join(runtimeRoot, component, "bin", "java.exe"),
+    path.join(runtimeRoot, component, "bin", "javaw.exe"),
+    ...walkForJavaExecutables(runtimeRoot, 4),
   ];
 
-  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
+  return [...new Set(candidates)].find((candidate) => fs.existsSync(candidate)) || "";
 }
 
 function walkForJavaExecutables(directory, maxDepth = 4, results = []) {
@@ -261,13 +331,18 @@ function commonJavaSearchRoots() {
 }
 
 function javaVersionInfo(javaPath) {
-  const result = spawnSync(javaPath, ["-version"], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
+  for (const candidate of javaExecutableCandidates(javaPath)) {
+    const result = spawnSync(candidate, ["-version"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
 
-  const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
-  return parseJavaVersionOutput(output);
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+    const parsed = parseJavaVersionOutput(output);
+    if (parsed) return parsed;
+  }
+
+  return null;
 }
 
 function parseJavaVersionOutput(output) {
@@ -346,12 +421,86 @@ function autoDetectJavaPath(version) {
   return undefined;
 }
 
-function resolveJavaPath(version, settings) {
-  // User-specified java path takes precedence
-  if (settings.javaPath) return settings.javaPath;
+function configuredJavaPath(version, settings) {
+  const needsLegacy = isLegacyJavaNeeded(version);
+  const explicitJava8 = String(settings?.java8Path || "").trim();
+  if (needsLegacy && explicitJava8) return explicitJava8;
 
-  // Optional explicit Java 8 override still works, but auto-detection is preferred.
-  if (isLegacyJavaNeeded(version) && settings.java8Path) return settings.java8Path;
+  const explicitJava = String(settings?.javaPath || "").trim();
+  if (!explicitJava) return "";
+  if (!needsLegacy) return explicitJava;
+
+  const info = javaVersionInfo(explicitJava);
+  return info && info.major <= 8 ? explicitJava : "";
+}
+
+function legacyRuntimeDownloadUrl() {
+  const byPlatform = LEGACY_JAVA_RUNTIME_DOWNLOADS[process.platform];
+  if (!byPlatform) return "";
+  return byPlatform[process.arch] || byPlatform.x64 || "";
+}
+
+async function ensureBundledJavaRuntime(component) {
+  if (component !== "jre-legacy") return "";
+
+  const existing = bundledJavaPath(component);
+  if (existing) return existing;
+
+  const downloadUrl = legacyRuntimeDownloadUrl();
+  if (!downloadUrl) return "";
+
+  const runtimeRoot = runtimeComponentDirectory(component);
+  const targetHome = path.join(runtimeRoot, component);
+  const extractRoot = path.join(runtimeRoot, "__extract");
+  const archivePath = runtimeCachePath(component, `${component}.zip`);
+
+  sendEvent(
+    "debug",
+    "Runtime Java legacy ausente; baixando JRE 8 portatil automaticamente."
+  );
+
+  await downloadFile(downloadUrl, archivePath, "java-runtime", "Runtime Java legado");
+
+  fs.rmSync(extractRoot, { recursive: true, force: true });
+  fs.mkdirSync(extractRoot, { recursive: true });
+
+  try {
+    const zip = new AdmZip(archivePath);
+    zip.extractAllTo(extractRoot, true);
+
+    const extractedHome = findJavaHome(extractRoot);
+    if (!extractedHome) {
+      throw new Error("Nao foi possivel localizar o Java 8 extraido.");
+    }
+
+    fs.rmSync(targetHome, { recursive: true, force: true });
+    fs.mkdirSync(runtimeRoot, { recursive: true });
+    fs.cpSync(extractedHome, targetHome, { recursive: true });
+  } catch (error) {
+    throw new Error(
+      `Falha ao preparar o runtime Java legado automaticamente: ${error.message || String(error)}`
+    );
+  } finally {
+    fs.rmSync(extractRoot, { recursive: true, force: true });
+  }
+
+  const resolved = bundledJavaPath(component);
+  if (!resolved) {
+    throw new Error("Runtime Java legado foi baixado, mas nao ficou disponivel para uso.");
+  }
+
+  const info = javaVersionInfo(resolved);
+  if (!info || info.major > 8) {
+    throw new Error("O runtime Java legado baixado nao e compativel com Java 8.");
+  }
+
+  sendEvent("debug", "Runtime Java legacy pronto para uso.");
+  return resolved;
+}
+
+function resolveJavaPath(version, settings) {
+  const configured = configuredJavaPath(version, settings);
+  if (configured) return configured;
 
   const autoDetected = autoDetectJavaPath(version);
   if (autoDetected) return autoDetected;
@@ -361,6 +510,19 @@ function resolveJavaPath(version, settings) {
   if (javaPath) return javaPath;
 
   return undefined;
+}
+
+async function resolveJavaPathForVersion(version, settings) {
+  const resolved = resolveJavaPath(version, settings);
+  if (resolved) return resolved;
+
+  const component = version?.javaVersion?.component;
+  if (!component) return undefined;
+
+  const provisioned = await ensureBundledJavaRuntime(component);
+  if (provisioned) return provisioned;
+
+  return resolveJavaPath(version, settings);
 }
 
 function isLegacyJavaNeeded(version) {
@@ -428,6 +590,8 @@ function publicAccount(account = loadAccount()) {
     xuid: account.xuid || null,
     updatedAt: account.updatedAt || null,
     demo: Boolean(account.profile.demo),
+    avatarUrl: accountAvatarUrl(account, 64),
+    skin: publicAccountSkin(account),
   };
 }
 
@@ -456,6 +620,66 @@ function saveAccountsData(data) {
   writeJson(accountsPath(), data);
 }
 
+function accountById(data, accountId) {
+  return data.accounts.find((account) => account.accountId === accountId) || null;
+}
+
+function fileUrlIfExists(filePath) {
+  return filePath && fs.existsSync(filePath) ? pathToFileURL(filePath).toString() : "";
+}
+
+function versionedFileUrl(filePath, version) {
+  const fileUrl = fileUrlIfExists(filePath);
+  const stamp = String(version || "").trim();
+  if (!fileUrl || !stamp) return fileUrl;
+  const separator = fileUrl.includes("?") ? "&" : "?";
+  return `${fileUrl}${separator}v=${encodeURIComponent(stamp)}`;
+}
+
+function normalizeSkinVariant(value) {
+  return String(value || "classic").trim().toLowerCase() === "slim"
+    ? "slim"
+    : "classic";
+}
+
+function publicAccountSkin(account) {
+  if (!account?.skin || typeof account.skin !== "object") return null;
+
+  const previewPath = ensureAccountSkinPreviewPath(account);
+  const assetVersion = account.skin.updatedAt || account.updatedAt || "";
+
+  return {
+    source: account.skin.source || "custom",
+    variant: normalizeSkinVariant(account.skin.variant),
+    previewUrl: versionedFileUrl(previewPath, assetVersion),
+    textureUrl: versionedFileUrl(account.skin.texturePath, assetVersion),
+    localOnly: Boolean(account.skin.localOnly),
+    updatedAt: account.skin.updatedAt || null,
+    label: account.skin.label || "",
+    hash: account.skin.hash || null,
+    skinId: account.skin.skinId || null,
+  };
+}
+
+function accountAvatarUrl(account, size = 64) {
+  const previewPath = ensureAccountSkinPreviewPath(account);
+  const previewUrl = versionedFileUrl(
+    previewPath,
+    account?.skin?.updatedAt || account?.updatedAt || ""
+  );
+  if (previewUrl) return previewUrl;
+
+  if (account?.type === "microsoft") {
+    return `https://minotar.net/helm/${account.profile.id}/${size}.png`;
+  }
+
+  return `https://minotar.net/helm/MHF_Steve/${size}.png`;
+}
+
+function mergeAccountSkin(existingAccount) {
+  return existingAccount?.skin ? { ...existingAccount.skin } : null;
+}
+
 function loadAccount() {
   const data = loadAccountsData();
   if (!data.activeId) return null;
@@ -472,13 +696,16 @@ function publicAccounts() {
     xuid: acc.xuid || null,
     updatedAt: acc.updatedAt || null,
     demo: Boolean(acc.profile.demo),
-    isActive: acc.accountId === data.activeId
+    isActive: acc.accountId === data.activeId,
+    avatarUrl: accountAvatarUrl(acc, 64),
+    skin: publicAccountSkin(acc),
   }));
 }
 
-function saveMicrosoftAccount(refreshToken, minecraftSession) {
+function saveMicrosoftAccount(refreshToken, minecraftSession, options = {}) {
   const data = loadAccountsData();
   const accountId = minecraftSession.profile.id;
+  const existingAccount = accountById(data, accountId);
   const account = {
     accountId,
     type: "microsoft",
@@ -487,16 +714,25 @@ function saveMicrosoftAccount(refreshToken, minecraftSession) {
       id: minecraftSession.profile.id,
       name: minecraftSession.profile.name,
       demo: Boolean(minecraftSession.profile.demo),
+      skins: Array.isArray(minecraftSession.profile.skins)
+        ? minecraftSession.profile.skins
+        : existingAccount?.profile?.skins || [],
+      capes: Array.isArray(minecraftSession.profile.capes)
+        ? minecraftSession.profile.capes
+        : existingAccount?.profile?.capes || [],
     },
     xuid: minecraftSession.xuid || null,
     updatedAt: new Date().toISOString(),
+    skin: mergeAccountSkin(existingAccount),
   };
   
   const existingIdx = data.accounts.findIndex(a => a.accountId === accountId);
   if (existingIdx >= 0) data.accounts[existingIdx] = account;
   else data.accounts.push(account);
   
-  data.activeId = accountId;
+  if (options.makeActive !== false || !data.activeId) {
+    data.activeId = accountId;
+  }
   saveAccountsData(data);
   return account;
 }
@@ -523,10 +759,11 @@ function normalizeOfflineUsername(username) {
   return value;
 }
 
-function saveLocalAccount(username) {
+function saveLocalAccount(username, options = {}) {
   const safeUsername = normalizeOfflineUsername(username);
   const accountId = offlineUuid(safeUsername);
   const data = loadAccountsData();
+  const existingAccount = accountById(data, accountId);
   
   const account = {
     accountId,
@@ -539,20 +776,33 @@ function saveLocalAccount(username) {
     },
     xuid: null,
     updatedAt: new Date().toISOString(),
+    skin: mergeAccountSkin(existingAccount),
   };
   
   const existingIdx = data.accounts.findIndex(a => a.accountId === accountId);
   if (existingIdx >= 0) data.accounts[existingIdx] = account;
   else data.accounts.push(account);
   
-  data.activeId = accountId;
+  if (options.makeActive !== false || !data.activeId) {
+    data.activeId = accountId;
+  }
   saveAccountsData(data);
   return account;
+}
+
+function removeAccountSkinFiles(accountId) {
+  const paths = [accountSkinTexturePath(accountId), accountSkinPreviewPath(accountId)];
+  for (const filePath of paths) {
+    if (fs.existsSync(filePath)) {
+      fs.rmSync(filePath, { force: true });
+    }
+  }
 }
 
 function deleteAccount(accountId) {
   const data = loadAccountsData();
   if (!accountId) accountId = data.activeId;
+  removeAccountSkinFiles(accountId);
   
   data.accounts = data.accounts.filter(a => a.accountId !== accountId);
   if (data.activeId === accountId) {
@@ -566,6 +816,416 @@ function setActiveAccount(accountId) {
   if (data.accounts.some(a => a.accountId === accountId)) {
     data.activeId = accountId;
     saveAccountsData(data);
+  }
+}
+
+function decodePngDataUrl(dataUrl) {
+  const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/i.exec(String(dataUrl || "").trim());
+  if (!match) {
+    throw new Error("Envie uma skin PNG valida.");
+  }
+
+  const buffer = Buffer.from(match[1], "base64");
+  return validateSkinBuffer(buffer);
+}
+
+function decodeCraftyTexture(textureBase64) {
+  const buffer = Buffer.from(String(textureBase64 || "").trim(), "base64");
+  return validateSkinBuffer(buffer);
+}
+
+function ensureAccountSkinPreviewPath(account) {
+  const texturePath = account?.skin?.texturePath;
+  const previewPath = account?.skin?.previewPath;
+  if (!texturePath || !previewPath || !fs.existsSync(texturePath)) {
+    return previewPath || "";
+  }
+
+  try {
+    let shouldRefresh = !fs.existsSync(previewPath);
+    if (!shouldRefresh) {
+      const previewImage = nativeImage.createFromPath(previewPath);
+      const size = previewImage.getSize();
+      shouldRefresh =
+        previewImage.isEmpty() ||
+        size.width !== ACCOUNT_SKIN_PREVIEW_SIZE ||
+        size.height !== ACCOUNT_SKIN_PREVIEW_SIZE;
+    }
+
+    if (shouldRefresh) {
+      ensureParent(previewPath);
+      fs.writeFileSync(previewPath, skinHeadPreviewBuffer(fs.readFileSync(texturePath)));
+    }
+  } catch (error) {
+    console.warn("[Socios Client]: Failed to refresh account skin preview", error);
+  }
+
+  return previewPath;
+}
+
+function validateSkinBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    throw new Error("A skin enviada esta vazia.");
+  }
+
+  if (buffer.length > MAX_ACCOUNT_SKIN_BYTES) {
+    throw new Error("A skin enviada e grande demais. Use um PNG de ate 2 MB.");
+  }
+
+  if (buffer[0] !== 0x89 || buffer[1] !== 0x50 || buffer[2] !== 0x4e || buffer[3] !== 0x47) {
+    throw new Error("A skin precisa estar no formato PNG.");
+  }
+
+  const image = nativeImage.createFromBuffer(buffer);
+  if (image.isEmpty()) {
+    throw new Error("Nao foi possivel ler a imagem da skin.");
+  }
+
+  const size = image.getSize();
+  if (size.width !== 64 || (size.height !== 64 && size.height !== 32)) {
+    throw new Error("A skin precisa ter dimensoes 64x64 ou 64x32.");
+  }
+
+  return image.toPNG();
+}
+
+function skinHeadPreviewBuffer(textureBuffer, size = ACCOUNT_SKIN_PREVIEW_SIZE) {
+  const image = nativeImage.createFromBuffer(textureBuffer);
+  if (image.isEmpty()) {
+    throw new Error("Nao foi possivel gerar a previa da skin.");
+  }
+
+  const head = image.crop({ x: 8, y: 8, width: 8, height: 8 });
+  if (size === 8) {
+    return head.toPNG();
+  }
+
+  return head.resize({ width: size, height: size }).toPNG();
+}
+
+function saveAccountSkinAssets(accountId, textureBuffer) {
+  const texturePath = accountSkinTexturePath(accountId);
+  const previewPath = accountSkinPreviewPath(accountId);
+  ensureParent(texturePath);
+  ensureParent(previewPath);
+  fs.writeFileSync(texturePath, textureBuffer);
+  fs.writeFileSync(previewPath, skinHeadPreviewBuffer(textureBuffer));
+  return { texturePath, previewPath };
+}
+
+async function refreshMinecraftAccount(account) {
+  if (!account?.refreshToken) {
+    throw new Error("Esta conta Microsoft precisa ser vinculada novamente.");
+  }
+
+  const auth = new Auth("none");
+  attachAuthEvents(auth);
+  const xbox = await auth.refresh(account.refreshToken);
+  const minecraft = await xbox.getMinecraft();
+  const refreshedAccount = saveMicrosoftAccount(xbox.save(), minecraft, { makeActive: false });
+  return { xbox, minecraft, account: refreshedAccount };
+}
+
+function buildMultipartFormData(parts, boundary) {
+  const chunks = [];
+
+  for (const part of parts) {
+    chunks.push(Buffer.from(`--${boundary}\r\n`, "utf8"));
+
+    for (const [name, value] of Object.entries(part.headers || {})) {
+      chunks.push(Buffer.from(`${name}: ${value}\r\n`, "utf8"));
+    }
+
+    chunks.push(Buffer.from("\r\n", "utf8"));
+
+    if (Buffer.isBuffer(part.body)) {
+      chunks.push(part.body);
+    } else {
+      chunks.push(Buffer.from(String(part.body || ""), "utf8"));
+    }
+
+    chunks.push(Buffer.from("\r\n", "utf8"));
+  }
+
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
+  return Buffer.concat(chunks);
+}
+
+function uploadMicrosoftSkinMultipart(accessToken, textureBuffer, variant) {
+  return new Promise((resolve, reject) => {
+    const boundary = `----SociosClient${crypto.randomBytes(16).toString("hex")}`;
+    const body = buildMultipartFormData(
+      [
+        {
+          headers: {
+            "Content-Disposition": 'form-data; name="variant"',
+          },
+          body: normalizeSkinVariant(variant),
+        },
+        {
+          headers: {
+            "Content-Disposition": 'form-data; name="file"; filename="skin.png"',
+            "Content-Type": "image/png",
+          },
+          body: textureBuffer,
+        },
+      ],
+      boundary
+    );
+
+    const request = https.request(
+      "https://api.minecraftservices.com/minecraft/profile/skins",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length,
+          "User-Agent": HTTP_USER_AGENT,
+        },
+      },
+      (response) => {
+        const chunks = [];
+
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          const message = Buffer.concat(chunks).toString("utf8").trim();
+          if ((response.statusCode || 0) >= 200 && (response.statusCode || 0) < 300) {
+            resolve(message);
+            return;
+          }
+
+          reject(
+            new Error(
+              message
+                ? `Falha ao atualizar a skin da conta Microsoft: ${message}`
+                : `Falha ao atualizar a skin da conta Microsoft: HTTP ${response.statusCode || 0}`
+            )
+          );
+        });
+      }
+    );
+
+    request.on("error", reject);
+    request.write(body);
+    request.end();
+  });
+}
+
+async function applyMicrosoftSkinBuffer(account, textureBuffer, variant) {
+  const { xbox, minecraft } = await refreshMinecraftAccount(account);
+  await uploadMicrosoftSkinMultipart(minecraft.mcToken, textureBuffer, variant);
+
+  await minecraft.refresh(true);
+  saveMicrosoftAccount(xbox.save(), minecraft, { makeActive: false });
+}
+
+function updateStoredAccount(accountId, updater) {
+  const data = loadAccountsData();
+  const index = data.accounts.findIndex((account) => account.accountId === accountId);
+  if (index < 0) {
+    throw new Error("Conta nao encontrada.");
+  }
+
+  const nextAccount = updater({ ...data.accounts[index] });
+  data.accounts[index] = nextAccount;
+  saveAccountsData(data);
+  return nextAccount;
+}
+
+async function updateAccountSkin(payload) {
+  const accountId = String(payload?.accountId || "").trim();
+  const source = String(payload?.source || "upload").trim().toLowerCase();
+  const variant = normalizeSkinVariant(payload?.variant);
+  const data = loadAccountsData();
+  const account = accountById(data, accountId);
+
+  if (!account) {
+    throw new Error("Conta nao encontrada para atualizar a skin.");
+  }
+
+  let textureBuffer;
+  let sourceLabel = "Skin personalizada";
+  let sourceHash = null;
+  let sourceSkinId = null;
+
+  if (source === "crafty") {
+    textureBuffer = decodeCraftyTexture(payload?.textureBase64);
+    sourceHash = String(payload?.hash || "").trim() || null;
+    sourceSkinId = String(payload?.skinId || "").trim() || null;
+    sourceLabel = payload?.label || "Crafty Skin Service";
+  } else {
+    textureBuffer = decodePngDataUrl(payload?.dataUrl);
+    sourceLabel = payload?.label || "Arquivo local";
+  }
+
+  if (account.type === "microsoft") {
+    await applyMicrosoftSkinBuffer(account, textureBuffer, variant);
+  }
+
+  const { texturePath, previewPath } = saveAccountSkinAssets(accountId, textureBuffer);
+  const updatedAccount = updateStoredAccount(accountId, (currentAccount) => ({
+    ...currentAccount,
+    updatedAt: new Date().toISOString(),
+    skin: {
+      source,
+      variant,
+      localOnly: currentAccount.type !== "microsoft",
+      label: sourceLabel,
+      hash: sourceHash,
+      skinId: sourceSkinId,
+      texturePath,
+      previewPath,
+      updatedAt: new Date().toISOString(),
+    },
+  }));
+
+  sendEvent(
+    "success",
+    updatedAccount.type === "microsoft"
+      ? `Skin da conta ${updatedAccount.profile.name} atualizada.`
+      : `Skin da conta local ${updatedAccount.profile.name} atualizada no launcher e aplicada ao jogo local.`
+  );
+
+  return publicAccount(updatedAccount);
+}
+
+function parseCraftySkinsHtml(html) {
+  const source = String(html || "");
+  const marker = "data:{skins:";
+  const start = source.indexOf(marker);
+  if (start < 0) {
+    throw new Error("Nao foi possivel localizar a lista de skins da Crafty.");
+  }
+
+  const arrayStart = source.indexOf("[", start + marker.length);
+  if (arrayStart < 0) {
+    throw new Error("Nao foi possivel localizar o bloco de skins da Crafty.");
+  }
+
+  let depth = 0;
+  let inString = false;
+  let stringDelimiter = "";
+  let escaping = false;
+  let arrayLiteral = "";
+
+  for (let index = arrayStart; index < source.length; index += 1) {
+    const char = source[index];
+    arrayLiteral += char;
+
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaping = true;
+        continue;
+      }
+
+      if (char === stringDelimiter) {
+        inString = false;
+        stringDelimiter = "";
+      }
+
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      inString = true;
+      stringDelimiter = char;
+      continue;
+    }
+
+    if (char === "[") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        break;
+      }
+    }
+  }
+
+  if (!arrayLiteral || depth !== 0) {
+    throw new Error("Nao foi possivel interpretar o bloco de skins da Crafty.");
+  }
+
+  const jsonText = arrayLiteral.replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g, '$1"$2":');
+  const parsed = JSON.parse(jsonText);
+  if (!Array.isArray(parsed)) {
+    throw new Error("A Crafty nao retornou uma lista valida de skins.");
+  }
+
+  return parsed;
+}
+
+function normalizeCraftySkin(skin) {
+  const hash = String(skin?.hash || "").trim();
+  const id = String(skin?.id || "").trim();
+  const username = String(skin?.username || "").trim();
+  if (!hash || !id || !skin?.texture) return null;
+
+  return {
+    id,
+    hash,
+    textureBase64: String(skin.texture || "").trim(),
+    variant: skin.slim ? "slim" : "classic",
+    previewUrl: `https://render.crafty.gg/3d/full/${encodeURIComponent(hash)}?width=96&height=160`,
+    headUrl: `https://render.crafty.gg/2d/head/${encodeURIComponent(hash)}?size=64`,
+    popularity: Number(skin.upvotes_monthly || skin.upvotes_lifetime || 0),
+    playersCount: Number(skin.players_count || 0),
+    label: username || `Crafty skin ${id.slice(0, 8)}`,
+  };
+}
+
+async function getCraftySkinCatalog(options = {}) {
+  const search = String(options?.search || "").trim();
+  const cachePath = craftySkinsCachePath(search);
+  const requestUrl = new URL(CRAFTY_SKINS_URL);
+  if (search) {
+    requestUrl.searchParams.set("search", search);
+  }
+
+  try {
+    const response = await fetch(requestUrl.toString(), {
+      headers: { "User-Agent": HTTP_USER_AGENT },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const html = await response.text();
+    const skins = parseCraftySkinsHtml(html)
+      .map(normalizeCraftySkin)
+      .filter(Boolean);
+
+    writeJson(cachePath, skins);
+    return skins;
+  } catch (error) {
+    const hasCache = fs.existsSync(cachePath);
+    const cached = hasCache ? readJson(cachePath, null) : null;
+    if (Array.isArray(cached)) {
+      sendEvent(
+        "warning",
+        search
+          ? `Falha ao atualizar a busca da Crafty por \"${search}\"; usando cache local.`
+          : "Falha ao atualizar a lista da Crafty; usando cache local."
+      );
+      return cached;
+    }
+
+    throw new Error(
+      search
+        ? `Nao foi possivel pesquisar skins da Crafty: ${error.message || String(error)}`
+        : `Nao foi possivel carregar as skins da Crafty: ${error.message || String(error)}`
+    );
   }
 }
 
@@ -685,6 +1345,16 @@ function clearLaunchContext(context) {
   if (!context || activeLaunchContext !== context) return;
   stopLaunchProcessPolling(context);
   detachLaunchProcessListeners(context);
+  if (Array.isArray(context.cleanupTasks)) {
+    for (const cleanup of context.cleanupTasks) {
+      try {
+        cleanup();
+      } catch (_error) {
+        // Per-launch resources should not block shutdown.
+      }
+    }
+    context.cleanupTasks = [];
+  }
   stopIdleGuard();
   activeProcess = null;
   busy = false;
@@ -713,6 +1383,347 @@ function uninstallVersion(input) {
 
   sendEvent("success", `Versao ${id} desinstalada.`);
   return { ok: true, id };
+}
+
+
+function unsignedUuid(value) {
+  return String(value || "").replace(/-/g, "").toLowerCase();
+}
+
+function localSkinSignatureKeyPair() {
+  if (!localSkinSignatureKeys) {
+    localSkinSignatureKeys = crypto.generateKeyPairSync("rsa", {
+      modulusLength: 4096,
+      publicKeyEncoding: {
+        type: "spki",
+        format: "pem",
+      },
+      privateKeyEncoding: {
+        type: "pkcs8",
+        format: "pem",
+      },
+    });
+  }
+
+  return localSkinSignatureKeys;
+}
+
+function signLocalSkinProperty(value) {
+  const signer = crypto.createSign("RSA-SHA1");
+  signer.update(String(value || ""), "utf8");
+  signer.end();
+  return signer.sign(localSkinSignatureKeyPair().privateKey, "base64");
+}
+
+function addLaunchContextCleanup(context, cleanup) {
+  if (!context || typeof cleanup !== "function") return;
+  if (!Array.isArray(context.cleanupTasks)) {
+    context.cleanupTasks = [];
+  }
+  context.cleanupTasks.push(cleanup);
+}
+
+async function ensureAuthlibInjectorJar() {
+  const jarPath = authlibInjectorJarPath();
+  if (fs.existsSync(jarPath)) {
+    return jarPath;
+  }
+
+  sendEvent("debug", "Baixando authlib-injector para aplicar a skin local dentro do Minecraft.");
+  await downloadFile(
+    AUTHLIB_INJECTOR_DOWNLOAD_URL,
+    jarPath,
+    "client-package",
+    "authlib-injector"
+  );
+  return jarPath;
+}
+
+function writeJsonResponse(response, statusCode, payload) {
+  const body = JSON.stringify(payload);
+  response.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+  });
+  response.end(body);
+}
+
+function writeEmptyResponse(response, statusCode = 204) {
+  response.writeHead(statusCode, {
+    "Cache-Control": "no-store",
+  });
+  response.end();
+}
+
+function writeTextResponse(response, statusCode, message) {
+  const body = String(message || "");
+  response.writeHead(statusCode, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+  });
+  response.end(body);
+}
+
+function readJsonRequestBody(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+
+    request.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > 64 * 1024) {
+        reject(new Error("Payload grande demais."));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    request.on("error", reject);
+    request.on("end", () => {
+      try {
+        const text = Buffer.concat(chunks).toString("utf8").trim();
+        resolve(text ? JSON.parse(text) : null);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
+function createLocalSkinTexturesProperty(account, rootUrl, textureHash) {
+  const textures = {
+    SKIN:
+      account.skin?.variant === "slim"
+        ? {
+            url: `${rootUrl}/textures/${textureHash}`,
+            metadata: { model: "slim" },
+          }
+        : {
+            url: `${rootUrl}/textures/${textureHash}`,
+          },
+  };
+
+  return Buffer.from(
+    JSON.stringify({
+      timestamp: Date.now(),
+      profileId: unsignedUuid(account.profile.id),
+      profileName: account.profile.name,
+      textures,
+    }),
+    "utf8"
+  ).toString("base64");
+}
+
+function createLocalSkinProfileResponse(account, rootUrl, textureHash, withSignature) {
+  const texturesValue = createLocalSkinTexturesProperty(account, rootUrl, textureHash);
+  const property = {
+    name: "textures",
+    value: texturesValue,
+  };
+
+  if (withSignature) {
+    property.signature = signLocalSkinProperty(texturesValue);
+  }
+
+  return {
+    id: unsignedUuid(account.profile.id),
+    name: account.profile.name,
+    properties: [property],
+  };
+}
+
+async function startLocalSkinServer(account) {
+  const texturePath = account?.skin?.texturePath;
+  if (!texturePath || !fs.existsSync(texturePath)) {
+    throw new Error("A textura da skin local nao foi encontrada para iniciar o servidor interno.");
+  }
+
+  const textureBuffer = validateSkinBuffer(fs.readFileSync(texturePath));
+  const textureHash = crypto.createHash("sha256").update(textureBuffer).digest("hex");
+  const accountName = String(account.profile?.name || "");
+  const accountNameLower = accountName.toLowerCase();
+  const accountUuid = unsignedUuid(account.profile?.id);
+
+  const server = http.createServer(async (request, response) => {
+    const rootUrl = `http://127.0.0.1:${server.address().port}`;
+    const requestUrl = new URL(request.url || "/", rootUrl);
+
+    try {
+      if (request.method === "GET" && requestUrl.pathname === "/") {
+        writeJsonResponse(response, 200, {
+          signaturePublickey: localSkinSignatureKeyPair().publicKey,
+          skinDomains: ["127.0.0.1", "localhost"],
+          meta: {
+            serverName: LAUNCHER_NAME,
+            implementationName: LAUNCHER_NAME,
+            implementationVersion: LAUNCHER_VERSION,
+            "feature.non_email_login": true,
+          },
+        });
+        return;
+      }
+
+      if (request.method === "GET" && requestUrl.pathname === "/status") {
+        writeJsonResponse(response, 200, {
+          "user.count": 1,
+          "token.count": 0,
+          "pendingAuthentication.count": 0,
+        });
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === "/api/profiles/minecraft") {
+        const names = await readJsonRequestBody(request);
+        const requestedNames = Array.isArray(names) ? names : [];
+        const matches = requestedNames
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+          .filter(
+            (value, index, list) =>
+              list.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index
+          )
+          .filter((value) => value.toLowerCase() === accountNameLower)
+          .map(() => ({ id: accountUuid, name: accountName }));
+        writeJsonResponse(response, 200, matches);
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        requestUrl.pathname === "/sessionserver/session/minecraft/hasJoined"
+      ) {
+        const username = String(requestUrl.searchParams.get("username") || "").trim();
+        if (username.toLowerCase() !== accountNameLower) {
+          writeEmptyResponse(response, 204);
+          return;
+        }
+
+        writeJsonResponse(
+          response,
+          200,
+          createLocalSkinProfileResponse(account, rootUrl, textureHash, true)
+        );
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        requestUrl.pathname === "/sessionserver/session/minecraft/join"
+      ) {
+        writeEmptyResponse(response, 204);
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        /^\/sessionserver\/session\/minecraft\/profile\/[a-f0-9]{32}$/.test(requestUrl.pathname)
+      ) {
+        const requestedUuid = requestUrl.pathname.split("/").pop();
+        if (requestedUuid !== accountUuid) {
+          writeEmptyResponse(response, 204);
+          return;
+        }
+
+        const withSignature = requestUrl.searchParams.get("unsigned") === "false";
+        writeJsonResponse(
+          response,
+          200,
+          createLocalSkinProfileResponse(account, rootUrl, textureHash, withSignature)
+        );
+        return;
+      }
+
+      if (request.method === "GET" && requestUrl.pathname === `/textures/${textureHash}`) {
+        response.writeHead(200, {
+          "Content-Type": "image/png",
+          "Content-Length": textureBuffer.length,
+          ETag: `"${textureHash}"`,
+          "Cache-Control": "max-age=2592000, public",
+        });
+        response.end(textureBuffer);
+        return;
+      }
+
+      writeEmptyResponse(response, 404);
+    } catch (error) {
+      writeTextResponse(response, 500, error.message || String(error));
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  return {
+    rootUrl: `http://127.0.0.1:${server.address().port}`,
+    close: () => {
+      if (!server.listening) return;
+      server.close();
+    },
+  };
+}
+
+async function prepareLocalSkinRuntime(account, authorization, context) {
+  if ((account?.type || "microsoft") !== "local") {
+    return {
+      authorization,
+      extraJvmArgs: [],
+    };
+  }
+
+  if (!account?.skin?.texturePath || !fs.existsSync(account.skin.texturePath)) {
+    return {
+      authorization,
+      extraJvmArgs: [],
+    };
+  }
+
+  try {
+    const [jarPath, localSkinServer] = await Promise.all([
+      ensureAuthlibInjectorJar(),
+      startLocalSkinServer(account),
+    ]);
+
+    addLaunchContextCleanup(context, () => localSkinServer.close());
+    sendEvent(
+      "debug",
+      `Skin local sera aplicada no jogo via authlib-injector (${localSkinServer.rootUrl}).`
+    );
+
+    return {
+      authorization: {
+        ...authorization,
+        client_token:
+          authorization.client_token || crypto.randomUUID().replace(/-/g, ""),
+        user_properties:
+          typeof authorization.user_properties === "string"
+            ? authorization.user_properties
+            : JSON.stringify(authorization.user_properties || {}),
+        meta: {
+          ...(authorization.meta || {}),
+          type: "msa",
+          xuid: authorization.meta?.xuid || "0",
+        },
+      },
+      extraJvmArgs: [
+        `-javaagent:${jarPath}=${localSkinServer.rootUrl}`,
+        "-Dauthlibinjector.side=client",
+      ],
+    };
+  } catch (error) {
+    sendEvent(
+      "warning",
+      `Nao foi possivel preparar a skin local dentro do Minecraft: ${error.message || String(error)}`
+    );
+    return {
+      authorization,
+      extraJvmArgs: [],
+    };
+  }
 }
 
 function finalizeLaunchContext(context, code, source = "client") {
@@ -2670,7 +3681,10 @@ async function installRemoteForgeVersion(version) {
     return installLegacyForgeFromInstaller(version, installerPath);
   }
 
-  const javaPath = resolveJavaPath({ ...meta, javaVersion: versionJson.javaVersion }, loadSettings());
+  const javaPath = await resolveJavaPathForVersion(
+    { ...meta, javaVersion: versionJson.javaVersion },
+    loadSettings()
+  );
   try {
     runJavaProcess(
       javaPath,
@@ -2745,7 +3759,10 @@ async function installRemoteOptiFineVersion(version) {
     await downloadFile(version.installerUrl, installerPath, "client-package", "Instalador OptiFine");
   }
 
-  const javaPath = resolveJavaPath({ ...meta, javaVersion: versionJson.javaVersion }, loadSettings());
+  const javaPath = await resolveJavaPathForVersion(
+    { ...meta, javaVersion: versionJson.javaVersion },
+    loadSettings()
+  );
 
   if (repairRequired) {
     fs.rmSync(versionDirectory(version.id), { recursive: true, force: true });
@@ -3447,7 +4464,7 @@ async function ensureVersionFiles(version) {
   };
 }
 
-function launcherOptions(version, authorization, settings) {
+function launcherOptions(version, authorization, settings, resolvedJavaPath) {
   const selectedType = version.type || "release";
   const launchNumber = version.launchNumber || version.inheritsFrom || version.id;
   const instanceCwd = version.gameDirectory || (version.local ? versionDirectory(version.id) : null);
@@ -3474,7 +4491,10 @@ function launcherOptions(version, authorization, settings) {
       max: normalizeMemory(settings.maxMemory, "4G"),
       min: normalizeMemory(settings.minMemory, "1G"),
     },
-    javaPath: resolveJavaPath(version, settings),
+    javaPath:
+      resolvedJavaPath === undefined
+        ? resolveJavaPath(version, settings)
+        : resolvedJavaPath,
     customArgs: [
       "-Djava.net.preferIPv4Stack=true",
       "-Djava.net.preferIPv4Addresses=true",
@@ -3536,7 +4556,7 @@ function wireLauncher(client) {
       ) {
         sendEvent(
           "error",
-          "Erro de ClassCastException detectado (URLClassLoader). Isso indica runtime Java incompatível para esta versão modded. O launcher agora prioriza automaticamente um runtime legacy compatível quando ele existe no sistema."
+          "Erro de ClassCastException detectado (URLClassLoader). Isso indica runtime Java incompatível para esta versao modded. O launcher agora tenta localizar ou preparar automaticamente um runtime legacy compativel antes da inicializacao."
         );
       }
     } catch (_e) {}
@@ -3603,6 +4623,7 @@ async function runMinecraft(mode, input) {
 
   try {
     const settings = saveSettings(input.settings || {});
+    const activeAccount = loadAccount();
     const authorization = await getAuthorization();
     const preparedVersion = await ensureVersionFiles(input.version);
     const client = mode === "install" ? new InstallOnlyClient() : new Client();
@@ -3612,23 +4633,40 @@ async function runMinecraft(mode, input) {
       finished: false,
       process: null,
       processListeners: null,
+      cleanupTasks: [],
     };
     activeLaunchContext = launchContext;
     wireLauncher(client);
-    const options = launcherOptions(preparedVersion, authorization, settings);
+    const localSkinRuntime =
+      mode === "launch"
+        ? await prepareLocalSkinRuntime(activeAccount, authorization, launchContext)
+        : { authorization, extraJvmArgs: [] };
+    const resolvedJavaPath = await resolveJavaPathForVersion(preparedVersion, settings);
+    const options = launcherOptions(
+      {
+        ...preparedVersion,
+        extraJvmArgs: [
+          ...(preparedVersion.extraJvmArgs || []),
+          ...(localSkinRuntime.extraJvmArgs || []),
+        ],
+      },
+      localSkinRuntime.authorization,
+      settings,
+      resolvedJavaPath
+    );
     sendEvent(
       "debug",
       options.javaPath
         ? `Java selecionado: ${options.javaPath}`
         : "Java selecionado: java do sistema"
     );
-    // Warn if this version needs Java 8 but no compatible Java was found
+    // Warn only if a legacy runtime is still unavailable after auto-provision attempts.
     if (isLegacyJavaNeeded(preparedVersion)) {
       if (!options.javaPath) {
         sendEvent(
           "error",
-          "AVISO: Esta versao requer Java 8, mas nenhum Java 8 foi encontrado no sistema. " +
-          "Configure o caminho do Java 8 nas configuracoes (campo 'Java') ou instale o Java 8. " +
+          "AVISO: Esta versao requer Java 8, mas nenhum runtime compativel foi encontrado ou preparado automaticamente. " +
+          "Configure o caminho do Java 8 nas configuracoes ou tente novamente com internet ativa para baixar o runtime legado. " +
           "O jogo pode falhar ao iniciar."
         );
       } else {
@@ -3762,6 +4800,8 @@ app.whenReady().then(() => {
     setActiveAccount(accountId);
     return null;
   });
+  ipcMain.handle("account:craftySkins", (_event, payload) => getCraftySkinCatalog(payload));
+  ipcMain.handle("account:updateSkin", (_event, payload) => updateAccountSkin(payload));
   ipcMain.handle("settings:save", (_event, settings) => saveSettings(settings));
   ipcMain.handle("minecraft:install", (_event, payload) =>
     runMinecraft("install", payload)

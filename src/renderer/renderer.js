@@ -1,4 +1,11 @@
 const api = window.launcherApi;
+const CRAFTY_SKINS_PAGE_SIZE = 6;
+const CRAFTY_SKIN_PREVIEW_DELAY_MS = 800;
+const CRAFTY_SKIN_SEARCH_DELAY_MS = 320;
+
+let skinHoverTimer = null;
+let skinViewer = null;
+let activeSkinPreviewIndex = null;
 
 const state = {
   versions: [],
@@ -6,6 +13,7 @@ const state = {
   latest: null,
   selected: null,
   account: null,
+  accounts: [],
   settings: null,
   busy: false,
   activeTab: "versions",
@@ -32,6 +40,18 @@ const state = {
   downloadLastSpeedBytes: 0,
   downloadLastSpeedTime: 0,
   downloadSpeed: 0,
+  skinEditorAccountId: null,
+  skinCatalog: [],
+  skinCatalogQuery: "",
+  skinCatalogPage: 1,
+  skinCatalogPageSize: CRAFTY_SKINS_PAGE_SIZE,
+  skinCatalogLoaded: false,
+  skinCatalogLoadedQuery: "",
+  skinCatalogLoading: false,
+  skinCatalogRequestId: 0,
+  skinCatalogSearchTimer: null,
+  skinCatalogError: "",
+  skinApplyBusy: false,
 };
 
 const elements = {
@@ -50,6 +70,24 @@ const elements = {
   closeAccountsModal: document.querySelector("#close-accounts-modal"),
   cancelAccountsModal: document.querySelector("#cancel-accounts-modal"),
   accountsList: document.querySelector("#accounts-list"),
+  accountSkinPanel: document.querySelector("#account-skin-panel"),
+  accountSkinPanelTitle: document.querySelector("#account-skin-panel-title"),
+  accountSkinPanelSubtitle: document.querySelector("#account-skin-panel-subtitle"),
+  accountSkinPreview: document.querySelector("#account-skin-preview"),
+  accountSkinStatus: document.querySelector("#account-skin-status"),
+  accountSkinHint: document.querySelector("#account-skin-hint"),
+  closeAccountSkinPanel: document.querySelector("#close-account-skin-panel"),
+  accountSkinUploadBtn: document.querySelector("#account-skin-upload-btn"),
+  accountSkinFile: document.querySelector("#account-skin-file"),
+  accountSkinVariant: document.querySelector("#account-skin-variant"),
+  reloadCraftySkins: document.querySelector("#reload-crafty-skins"),
+  craftySkinSearch: document.querySelector("#crafty-skin-search"),
+  craftySkinsList: document.querySelector("#crafty-skins-list"),
+  craftySkinsPagination: document.querySelector("#crafty-skins-pagination"),
+  craftySkinHoverPopup: document.querySelector("#crafty-skin-hover-popup"),
+  craftySkinHoverCanvas: document.querySelector("#crafty-skin-hover-canvas"),
+  craftySkinHoverTitle: document.querySelector("#crafty-skin-hover-title"),
+  craftySkinHoverMeta: document.querySelector("#crafty-skin-hover-meta"),
   localAccountModal: document.querySelector("#local-account-modal"),
   closeLocalAccountModal: document.querySelector("#close-local-account-modal"),
   cancelLocalAccount: document.querySelector("#cancel-local-account"),
@@ -129,7 +167,7 @@ function setBusy(value) {
     elements.navModpacks,
     elements.browseMode,
     elements.addAccount,
-    elements.addLocalAccount,
+    elements.addLocalAccountBtn,
     elements.removeAccount,
     elements.refreshVersions,
     elements.installVersion,
@@ -160,6 +198,10 @@ function setBusy(value) {
     !elements.modpackVersionModal.classList.contains("hidden")
   ) {
     renderModpackVersionOptions();
+  }
+
+  if (elements.accountsModal && !elements.accountsModal.classList.contains("hidden")) {
+    renderAccountsModal();
   }
 }
 
@@ -406,22 +448,384 @@ function applySettings(settings) {
   } catch (_e) {}
 }
 
+function accountTypeLabel(type) {
+  return type === "microsoft" ? "Microsoft" : "Local";
+}
+
+function selectedSkinEditorAccount() {
+  return (state.accounts || []).find((account) => account.accountId === state.skinEditorAccountId) || null;
+}
+
+function closeAccountsModal() {
+  state.skinEditorAccountId = null;
+  clearCraftySkinSearchTimer();
+  clearCraftySkinHoverTimer();
+  hideCraftySkinHoverPopup();
+  if (elements.accountSkinFile) {
+    elements.accountSkinFile.value = "";
+  }
+  if (elements.accountsModal) {
+    elements.accountsModal.classList.add("hidden");
+    elements.accountsModal.setAttribute("aria-hidden", "true");
+  }
+  renderAccountsModal();
+}
+
+function openSkinEditor(accountId) {
+  state.skinEditorAccountId = accountId;
+  const account = selectedSkinEditorAccount();
+  if (account && elements.accountSkinVariant) {
+    elements.accountSkinVariant.value = account.skin?.variant || "classic";
+  }
+  renderAccountsModal();
+  loadCraftySkins();
+}
+
+function formatCompactNumber(value) {
+  return new Intl.NumberFormat("pt-BR", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(Number(value || 0));
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Nao foi possivel ler o arquivo da skin."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function clearCraftySkinSearchTimer() {
+  if (state.skinCatalogSearchTimer) {
+    clearTimeout(state.skinCatalogSearchTimer);
+    state.skinCatalogSearchTimer = null;
+  }
+}
+
+function queueCraftySkinSearch() {
+  clearCraftySkinSearchTimer();
+  state.skinCatalogSearchTimer = setTimeout(() => {
+    state.skinCatalogSearchTimer = null;
+    loadCraftySkins();
+  }, CRAFTY_SKIN_SEARCH_DELAY_MS);
+}
+
+function filteredCraftySkins() {
+  return state.skinCatalog.map((skin, index) => ({ skin, index }));
+}
+
+function totalCraftySkinPages() {
+  return Math.max(1, Math.ceil(filteredCraftySkins().length / state.skinCatalogPageSize));
+}
+
+function visibleCraftySkins() {
+  const filtered = filteredCraftySkins();
+  const totalPages = totalCraftySkinPages();
+  if (state.skinCatalogPage > totalPages) {
+    state.skinCatalogPage = totalPages;
+  }
+
+  const start = (state.skinCatalogPage - 1) * state.skinCatalogPageSize;
+  return filtered.slice(start, start + state.skinCatalogPageSize);
+}
+
+function hideCraftySkinHoverPopup() {
+  if (elements.craftySkinHoverPopup) {
+    elements.craftySkinHoverPopup.classList.add("hidden");
+    elements.craftySkinHoverPopup.setAttribute("aria-hidden", "true");
+  }
+  activeSkinPreviewIndex = null;
+}
+
+function clearCraftySkinHoverTimer() {
+  if (skinHoverTimer) {
+    clearTimeout(skinHoverTimer);
+    skinHoverTimer = null;
+  }
+}
+
+function ensureSkinViewer() {
+  if (skinViewer || !elements.craftySkinHoverCanvas || !window.skinview3d?.SkinViewer) {
+    return skinViewer;
+  }
+
+  skinViewer = new window.skinview3d.SkinViewer({
+    canvas: elements.craftySkinHoverCanvas,
+    width: 260,
+    height: 320,
+    enableControls: false,
+    zoom: 0.72,
+  });
+  skinViewer.autoRotate = true;
+  skinViewer.autoRotateSpeed = 1.4;
+  skinViewer.globalLight.intensity = 1.2;
+  skinViewer.cameraLight.intensity = 0.7;
+  return skinViewer;
+}
+
+function positionCraftySkinHoverPopup(card) {
+  if (!elements.craftySkinHoverPopup || !card) return;
+
+  const cardRect = card.getBoundingClientRect();
+  const popupWidth = 286;
+  const popupHeight = 396;
+  const gap = 18;
+  const margin = 16;
+
+  let left = cardRect.right + gap;
+  if (left + popupWidth > window.innerWidth - margin) {
+    left = cardRect.left - popupWidth - gap;
+  }
+
+  let top = cardRect.top + cardRect.height / 2 - popupHeight / 2;
+  top = Math.max(margin, Math.min(top, window.innerHeight - popupHeight - margin));
+  left = Math.max(margin, Math.min(left, window.innerWidth - popupWidth - margin));
+
+  elements.craftySkinHoverPopup.style.left = `${Math.round(left)}px`;
+  elements.craftySkinHoverPopup.style.top = `${Math.round(top)}px`;
+}
+
+function textureDataUrl(textureBase64) {
+  return `data:image/png;base64,${textureBase64}`;
+}
+
+function showCraftySkinHoverPopup(index, card) {
+  const skin = state.skinCatalog[index];
+  if (!skin || !card) return;
+
+  const viewer = ensureSkinViewer();
+  if (!viewer || !elements.craftySkinHoverPopup) return;
+
+  viewer.loadSkin(textureDataUrl(skin.textureBase64), {
+    model: skin.variant === "slim" ? "slim" : "default",
+  });
+  viewer.width = 260;
+  viewer.height = 320;
+  viewer.zoom = 0.72;
+  viewer.fov = 42;
+  viewer.autoRotate = true;
+
+  elements.craftySkinHoverTitle.textContent = skin.label;
+  elements.craftySkinHoverMeta.textContent = `Modelo ${
+    skin.variant === "slim" ? "Slim" : "Classic"
+  } • ${formatCompactNumber(skin.popularity)} curtidas`;
+
+  positionCraftySkinHoverPopup(card);
+  elements.craftySkinHoverPopup.classList.remove("hidden");
+  elements.craftySkinHoverPopup.setAttribute("aria-hidden", "false");
+  activeSkinPreviewIndex = index;
+}
+
+function scheduleCraftySkinHoverPopup(index, card) {
+  clearCraftySkinHoverTimer();
+  hideCraftySkinHoverPopup();
+  skinHoverTimer = setTimeout(() => {
+    showCraftySkinHoverPopup(index, card);
+    skinHoverTimer = null;
+  }, CRAFTY_SKIN_PREVIEW_DELAY_MS);
+}
+
+function renderCraftySkinPagination() {
+  if (!elements.craftySkinsPagination) return;
+
+  const filteredCount = filteredCraftySkins().length;
+  const totalPages = totalCraftySkinPages();
+  if (state.skinCatalogLoading || filteredCount === 0 || totalPages <= 1) {
+    elements.craftySkinsPagination.innerHTML = "";
+    elements.craftySkinsPagination.classList.add("hidden");
+    return;
+  }
+
+  const pageButtons = [];
+  for (let page = 1; page <= totalPages; page += 1) {
+    pageButtons.push(`
+      <button
+        class="crafty-page-button${page === state.skinCatalogPage ? " active" : ""}"
+        type="button"
+        data-page="${page}"
+      >
+        ${page}
+      </button>
+    `);
+  }
+
+  elements.craftySkinsPagination.innerHTML = `
+    <button
+      class="ghost crafty-page-nav"
+      type="button"
+      data-page-nav="prev"
+      ${state.skinCatalogPage <= 1 ? "disabled" : ""}
+    >
+      Anterior
+    </button>
+    <div class="crafty-page-buttons">${pageButtons.join("")}</div>
+    <span class="crafty-page-status">Pagina ${state.skinCatalogPage} de ${totalPages}</span>
+    <button
+      class="ghost crafty-page-nav"
+      type="button"
+      data-page-nav="next"
+      ${state.skinCatalogPage >= totalPages ? "disabled" : ""}
+    >
+      Proxima
+    </button>
+  `;
+  elements.craftySkinsPagination.classList.remove("hidden");
+}
+
+function renderCraftySkinList(account) {
+  if (!elements.craftySkinsList) return;
+
+  const searchQuery = String(state.skinCatalogQuery || "").trim();
+
+  if (state.skinCatalogLoading) {
+    elements.craftySkinsList.innerHTML =
+      '<div class="crafty-skins-empty">Carregando skins da Crafty...</div>';
+    renderCraftySkinPagination();
+    return;
+  }
+
+  if (state.skinCatalogError && state.skinCatalog.length === 0) {
+    elements.craftySkinsList.innerHTML = `<div class="crafty-skins-empty">${escapeHtml(
+      state.skinCatalogError
+    )}</div>`;
+    renderCraftySkinPagination();
+    return;
+  }
+
+  if (!state.skinCatalog.length) {
+    elements.craftySkinsList.innerHTML = searchQuery
+      ? `<div class="crafty-skins-empty">Nenhuma skin encontrada para &quot;${escapeHtml(
+          searchQuery
+        )}&quot;.</div>`
+      : '<div class="crafty-skins-empty">Nenhuma skin da Crafty disponivel agora.</div>';
+    renderCraftySkinPagination();
+    return;
+  }
+
+  elements.craftySkinsList.innerHTML = visibleCraftySkins()
+    .map(({ skin, index }) => {
+      const isSelected = Boolean(account?.skin?.hash && account.skin.hash === skin.hash);
+      return `
+        <button
+          class="crafty-skin-card${isSelected ? " selected" : ""}"
+          type="button"
+          data-index="${index}"
+          ${state.busy || state.skinApplyBusy ? "disabled" : ""}
+        >
+          <img src="${escapeHtml(skin.headUrl || skin.previewUrl)}" class="crafty-skin-image" alt="${escapeHtml(
+        skin.label
+      )}">
+          <div class="crafty-skin-copy">
+            <strong>${escapeHtml(skin.label)}</strong>
+            <small>${escapeHtml(`Modelo ${skin.variant === "slim" ? "Slim" : "Classic"}`)}</small>
+            <small>${escapeHtml(
+              `${formatCompactNumber(skin.popularity)} curtidas · ${formatCompactNumber(
+                skin.playersCount
+              )} usos`
+            )}</small>
+          </div>
+        </button>
+      `;
+    })
+    .join("");
+
+  renderCraftySkinPagination();
+}
+
+function renderAccountSkinPanel() {
+  if (!elements.accountSkinPanel) return;
+
+  const account = selectedSkinEditorAccount();
+  if (elements.accountsModal) {
+    elements.accountsModal.classList.toggle("skin-editor-open", Boolean(account));
+  }
+
+  if (!account) {
+    elements.accountSkinPanel.classList.add("hidden");
+    clearCraftySkinHoverTimer();
+    hideCraftySkinHoverPopup();
+    if (elements.accountSkinPreview) {
+      elements.accountSkinPreview.removeAttribute("src");
+    }
+    if (elements.craftySkinsList) {
+      elements.craftySkinsList.innerHTML = "";
+    }
+    return;
+  }
+
+  elements.accountSkinPanel.classList.remove("hidden");
+  elements.accountSkinPanelTitle.textContent = `Trocar skin de ${account.name}`;
+  elements.accountSkinPanelSubtitle.textContent =
+    account.type === "microsoft"
+      ? "A nova skin sera aplicada na conta Microsoft e salva no launcher."
+      : "Em conta local, a skin personalizada aparece no launcher.";
+
+  if (elements.accountSkinPreview) {
+    elements.accountSkinPreview.src = account.skin?.previewUrl || account.avatarUrl;
+    elements.accountSkinPreview.alt = `Skin de ${account.name}`;
+  }
+
+  if (elements.craftySkinSearch) {
+    elements.craftySkinSearch.value = state.skinCatalogQuery;
+    elements.craftySkinSearch.disabled = state.busy || state.skinApplyBusy;
+  }
+
+  if (elements.accountSkinVariant) {
+    elements.accountSkinVariant.value = account.skin?.variant || elements.accountSkinVariant.value || "classic";
+    elements.accountSkinVariant.disabled = state.busy || state.skinApplyBusy;
+  }
+
+  if (elements.accountSkinUploadBtn) {
+    elements.accountSkinUploadBtn.disabled = state.busy || state.skinApplyBusy;
+  }
+
+  if (elements.reloadCraftySkins) {
+    elements.reloadCraftySkins.disabled = state.busy || state.skinCatalogLoading || state.skinApplyBusy;
+  }
+
+  const details = [];
+  if (account.skin?.label) {
+    details.push(account.skin.label);
+  }
+  if (account.skin?.updatedAt) {
+    details.push(`Atualizada em ${formatDate(account.skin.updatedAt)}`);
+  }
+  if (state.skinCatalogError) {
+    details.push(state.skinCatalogError);
+  }
+
+  elements.accountSkinStatus.textContent =
+    details.join(" • ") || "Use um PNG proprio ou escolha uma skin pronta da Crafty.";
+  elements.accountSkinHint.textContent =
+    account.type === "microsoft"
+      ? "Arquivos PNG validos: 64x64 ou 64x32. O upload pode levar alguns segundos."
+      : "Contas locais usam authlib-injector para mostrar a skin dentro do jogo em sessoes locais/offline. No primeiro uso o launcher pode baixar esse componente.";
+
+  renderCraftySkinList(account);
+}
+
 function renderAccount() {
   if (state.account) {
-    const avatarUrl =
-      state.account.type === "microsoft"
-        ? `https://minotar.net/helm/${state.account.id}/64.png`
-        : `https://minotar.net/helm/MHF_Steve/64.png`;
     elements.accountView.innerHTML = `
-      <img src="${avatarUrl}" class="avatar" alt="Avatar">
+      <img src="${escapeHtml(state.account.avatarUrl)}" class="avatar avatar-image" alt="Avatar">
       <div style="flex: 1; overflow: hidden;">
         <strong>${state.account.name}</strong>
-        <small>${state.account.type === "microsoft" ? "Microsoft" : "Local"}</small>
+        <small>${accountTypeLabel(state.account.type)}</small>
       </div>
       <svg id="account-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transition: transform 0.2s; color: var(--muted);"><polyline points="6 9 12 15 18 9"></polyline></svg>
     `;
     elements.accountStatus.textContent = "Online";
-    elements.accountStatus.className = "status-pill status-online";
+    elements.accountStatus.className = "status-pill online";
   } else {
     elements.accountView.innerHTML = `
       <div class="avatar">?</div>
@@ -432,7 +836,7 @@ function renderAccount() {
       <svg id="account-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transition: transform 0.2s; color: var(--muted);"><polyline points="6 9 12 15 18 9"></polyline></svg>
     `;
     elements.accountStatus.textContent = "Offline";
-    elements.accountStatus.className = "status-pill status-offline";
+    elements.accountStatus.className = "status-pill";
   }
 
   // Restore the chevron listener reference
@@ -447,40 +851,119 @@ function renderAccountsModal() {
   if (!elements.accountsList) return;
   const accounts = state.accounts || [];
   if (accounts.length === 0) {
-    elements.accountsList.innerHTML = `<div style="padding: 16px; text-align: center; color: var(--muted);">Nenhuma conta adicionada.</div>`;
+    elements.accountsList.innerHTML = '<div class="accounts-empty">Nenhuma conta adicionada.</div>';
+    renderAccountSkinPanel();
     return;
   }
-  
-  elements.accountsList.innerHTML = accounts.map(acc => `
-    <div class="account-item" style="display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--surface-2); border: 1px solid ${acc.isActive ? 'var(--primary)' : 'var(--line)'}; border-radius: 8px; cursor: pointer;" data-id="${acc.accountId}">
-      <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
-        <img src="https://minotar.net/helm/${acc.type === 'microsoft' ? acc.id : 'MHF_Steve'}/32.png" style="width: 32px; height: 32px; border-radius: 4px;">
-        <div style="display: flex; flex-direction: column;">
-          <strong style="color: ${acc.isActive ? 'var(--primary)' : 'var(--text)'};">${acc.name}</strong>
-          <small style="color: var(--muted); font-size: 11px;">${acc.type === 'microsoft' ? 'Microsoft' : 'Local'}</small>
+
+  elements.accountsList.innerHTML = accounts
+    .map((account) => {
+      const isEditing = state.skinEditorAccountId === account.accountId;
+      return `
+        <div class="account-item${account.isActive ? " active" : ""}${isEditing ? " editing" : ""}" data-id="${escapeHtml(
+        account.accountId
+      )}">
+          <div class="account-item-main">
+            <button
+              class="account-skin-trigger"
+              type="button"
+              data-id="${escapeHtml(account.accountId)}"
+              aria-label="Trocar skin de ${escapeHtml(account.name)}"
+              ${state.busy || state.skinApplyBusy ? "disabled" : ""}
+            >
+              <img src="${escapeHtml(account.skin?.previewUrl || account.avatarUrl)}" class="account-item-avatar" alt="Skin de ${escapeHtml(
+        account.name
+      )}">
+            </button>
+            <div class="account-item-copy">
+              <strong>${escapeHtml(account.name)}</strong>
+              <small>${escapeHtml(accountTypeLabel(account.type))}</small>
+            </div>
+          </div>
+          <div class="account-item-actions">
+            ${
+              account.skin
+                ? `<span class="account-chip">${escapeHtml(
+                    account.skin.source === "crafty" ? "Crafty" : "Skin"
+                  )}</span>`
+                : ""
+            }
+            ${account.isActive ? '<span class="account-chip account-chip-active">Ativa</span>' : ""}
+            <button
+              class="ghost icon-button small-icon-button btn-remove-account"
+              type="button"
+              data-id="${escapeHtml(account.accountId)}"
+              aria-label="Remover conta ${escapeHtml(account.name)}"
+              ${state.busy || state.skinApplyBusy ? "disabled" : ""}
+            >
+              ×
+            </button>
+          </div>
         </div>
-      </div>
-      ${acc.isActive ? '<span style="font-size: 11px; padding: 2px 6px; background: var(--primary); color: white; border-radius: 4px; margin-right: 8px;">Ativa</span>' : ''}
-      <button class="ghost icon-button small-icon-button btn-remove-account" data-id="${acc.accountId}" aria-label="Remover">×</button>
-    </div>
-  `).join("");
-  
-  elements.accountsList.querySelectorAll('.account-item').forEach(el => {
-    el.addEventListener('click', async (e) => {
-      if (e.target.closest('.btn-remove-account')) return;
-      const id = el.getAttribute('data-id');
-      await api.setActiveAccount(id);
-      await refreshState();
+      `;
+    })
+    .join("");
+
+  renderAccountSkinPanel();
+}
+
+async function loadCraftySkins(force = false) {
+  const searchQuery = String(state.skinCatalogQuery || "").trim();
+  const searchKey = normalizeSearchText(searchQuery);
+  if (!force && state.skinCatalogLoaded && state.skinCatalogLoadedQuery === searchKey) return;
+
+  const requestId = state.skinCatalogRequestId + 1;
+  const queryChanged = state.skinCatalogLoadedQuery !== searchKey;
+  state.skinCatalogRequestId = requestId;
+
+  state.skinCatalogLoading = true;
+  state.skinCatalogError = "";
+  if (queryChanged) {
+    state.skinCatalog = [];
+  }
+  clearCraftySkinHoverTimer();
+  hideCraftySkinHoverPopup();
+  renderAccountSkinPanel();
+
+  try {
+    const skins = await api.getCraftySkins({ search: searchQuery });
+    if (requestId !== state.skinCatalogRequestId) return;
+
+    state.skinCatalog = Array.isArray(skins) ? skins : [];
+    state.skinCatalogLoaded = true;
+    state.skinCatalogLoadedQuery = searchKey;
+  } catch (error) {
+    if (requestId !== state.skinCatalogRequestId) return;
+
+    state.skinCatalogError = error.message || String(error);
+    appendLog("error", state.skinCatalogError);
+  } finally {
+    if (requestId !== state.skinCatalogRequestId) return;
+
+    state.skinCatalogLoading = false;
+    renderAccountSkinPanel();
+  }
+}
+
+async function applySkinToSelectedAccount(payload) {
+  const account = selectedSkinEditorAccount();
+  if (!account) return;
+
+  state.skinApplyBusy = true;
+  renderAccountSkinPanel();
+
+  try {
+    await api.updateAccountSkin({
+      accountId: account.accountId,
+      ...payload,
     });
-  });
-  
-  elements.accountsList.querySelectorAll('.btn-remove-account').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id = btn.getAttribute('data-id');
-      await api.removeAccount({ accountId: id });
-      await refreshState();
-    });
-  });
+    await refreshState();
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.skinApplyBusy = false;
+    renderAccountSkinPanel();
+  }
 }
 
 function versionLabel(version) {
@@ -1352,6 +1835,12 @@ async function refreshState(forceVersions = false) {
     const manifest = forceVersions ? await api.refreshVersions() : data.versions;
     state.account = data.account;
     state.accounts = data.accounts || [];
+    if (
+      state.skinEditorAccountId &&
+      !state.accounts.some((account) => account.accountId === state.skinEditorAccountId)
+    ) {
+      state.skinEditorAccountId = null;
+    }
     state.busy = Boolean(data.busy);
     state.versions = manifest.versions;
     state.latest = manifest.latest;
@@ -1454,7 +1943,7 @@ elements.addAccount.addEventListener("click", async () => {
   try {
     const newAcc = await api.addAccount();
     if (newAcc) state.account = newAcc;
-    if (elements.accountsModal) elements.accountsModal.classList.add("hidden");
+    closeAccountsModal();
     await refreshState();
   } catch (error) {
     appendLog("error", error.message || String(error));
@@ -1465,7 +1954,7 @@ elements.addAccount.addEventListener("click", async () => {
 
 if (elements.addLocalAccountBtn) {
   elements.addLocalAccountBtn.addEventListener("click", () => {
-    if (elements.accountsModal) elements.accountsModal.classList.add("hidden");
+    closeAccountsModal();
     openLocalAccountModal();
   });
 }
@@ -1508,6 +1997,173 @@ document.addEventListener("keydown", (event) => {
 
   if (!elements.localAccountModal.classList.contains("hidden")) {
     closeLocalAccountModal();
+    return;
+  }
+
+  if (!elements.accountsModal.classList.contains("hidden")) {
+    closeAccountsModal();
+  }
+});
+
+if (elements.accountsList) {
+  elements.accountsList.addEventListener("click", async (event) => {
+    const removeButton = event.target.closest(".btn-remove-account");
+    if (removeButton) {
+      const accountId = removeButton.getAttribute("data-id");
+      await api.removeAccount({ accountId });
+      await refreshState();
+      return;
+    }
+
+    const skinButton = event.target.closest(".account-skin-trigger");
+    if (skinButton) {
+      event.preventDefault();
+      openSkinEditor(skinButton.getAttribute("data-id"));
+      return;
+    }
+
+    const accountItem = event.target.closest(".account-item");
+    if (!accountItem || state.busy || state.skinApplyBusy) return;
+    await api.setActiveAccount(accountItem.getAttribute("data-id"));
+    await refreshState();
+  });
+}
+
+if (elements.accountSkinUploadBtn) {
+  elements.accountSkinUploadBtn.addEventListener("click", () => {
+    if (state.busy || state.skinApplyBusy || !elements.accountSkinFile) return;
+    elements.accountSkinFile.click();
+  });
+}
+
+if (elements.accountSkinFile) {
+  elements.accountSkinFile.addEventListener("change", async () => {
+    const [file] = elements.accountSkinFile.files || [];
+    if (!file) return;
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      await applySkinToSelectedAccount({
+        source: "upload",
+        dataUrl,
+        variant: elements.accountSkinVariant?.value || "classic",
+        label: file.name || "Arquivo local",
+      });
+    } finally {
+      elements.accountSkinFile.value = "";
+    }
+  });
+}
+
+if (elements.reloadCraftySkins) {
+  elements.reloadCraftySkins.addEventListener("click", () => {
+    clearCraftySkinSearchTimer();
+    loadCraftySkins(true);
+  });
+}
+
+if (elements.craftySkinSearch) {
+  elements.craftySkinSearch.addEventListener("input", (event) => {
+    state.skinCatalogQuery = event.target.value || "";
+    state.skinCatalogPage = 1;
+    state.skinCatalogError = "";
+    clearCraftySkinHoverTimer();
+    hideCraftySkinHoverPopup();
+    queueCraftySkinSearch();
+  });
+}
+
+if (elements.craftySkinsList) {
+  elements.craftySkinsList.addEventListener("mouseover", (event) => {
+    const card = event.target.closest(".crafty-skin-card");
+    if (!card || !elements.craftySkinsList.contains(card)) return;
+    if (event.relatedTarget && card.contains(event.relatedTarget)) return;
+
+    const index = Number(card.getAttribute("data-index"));
+    if (Number.isNaN(index)) return;
+    scheduleCraftySkinHoverPopup(index, card);
+  });
+
+  elements.craftySkinsList.addEventListener("mouseout", (event) => {
+    const card = event.target.closest(".crafty-skin-card");
+    if (!card || !elements.craftySkinsList.contains(card)) return;
+    if (event.relatedTarget && card.contains(event.relatedTarget)) return;
+
+    clearCraftySkinHoverTimer();
+    hideCraftySkinHoverPopup();
+  });
+
+  elements.craftySkinsList.addEventListener("scroll", () => {
+    clearCraftySkinHoverTimer();
+    hideCraftySkinHoverPopup();
+  });
+
+  elements.craftySkinsList.addEventListener("click", async (event) => {
+    const card = event.target.closest(".crafty-skin-card");
+    if (!card || state.busy || state.skinApplyBusy) return;
+
+    clearCraftySkinHoverTimer();
+    hideCraftySkinHoverPopup();
+    const index = Number(card.getAttribute("data-index"));
+    const skin = state.skinCatalog[index];
+    if (!skin) return;
+
+    await applySkinToSelectedAccount({
+      source: "crafty",
+      textureBase64: skin.textureBase64,
+      hash: skin.hash,
+      skinId: skin.id,
+      variant: skin.variant,
+      label: skin.label,
+    });
+  });
+}
+
+if (elements.craftySkinsPagination) {
+  elements.craftySkinsPagination.addEventListener("click", (event) => {
+    const pageButton = event.target.closest("[data-page]");
+    if (pageButton) {
+      state.skinCatalogPage = Number(pageButton.getAttribute("data-page"));
+      clearCraftySkinHoverTimer();
+      hideCraftySkinHoverPopup();
+      renderAccountSkinPanel();
+      return;
+    }
+
+    const navButton = event.target.closest("[data-page-nav]");
+    if (!navButton) return;
+
+    const direction = navButton.getAttribute("data-page-nav");
+    const totalPages = totalCraftySkinPages();
+    if (direction === "prev") {
+      state.skinCatalogPage = Math.max(1, state.skinCatalogPage - 1);
+    } else {
+      state.skinCatalogPage = Math.min(totalPages, state.skinCatalogPage + 1);
+    }
+
+    clearCraftySkinHoverTimer();
+    hideCraftySkinHoverPopup();
+    renderAccountSkinPanel();
+  });
+}
+
+window.addEventListener("resize", () => {
+  if (activeSkinPreviewIndex === null) return;
+  const activeCard = elements.craftySkinsList?.querySelector(
+    `.crafty-skin-card[data-index="${activeSkinPreviewIndex}"]`
+  );
+  if (!activeCard) {
+    hideCraftySkinHoverPopup();
+    return;
+  }
+  positionCraftySkinHoverPopup(activeCard);
+});
+
+window.addEventListener("beforeunload", () => {
+  clearCraftySkinHoverTimer();
+  if (skinViewer) {
+    skinViewer.dispose();
+    skinViewer = null;
   }
 });
 
@@ -1587,16 +2243,31 @@ if (elements.manageAccountsBtn) {
   elements.manageAccountsBtn.addEventListener("click", () => {
     elements.accountDropdown.classList.add("hidden");
     if (elements.accountChevron) elements.accountChevron.style.transform = "rotate(0deg)";
+    state.skinEditorAccountId = null;
     elements.accountsModal.classList.remove("hidden");
+    elements.accountsModal.setAttribute("aria-hidden", "false");
     renderAccountsModal();
   });
 }
 
 if (elements.closeAccountsModal) {
-  elements.closeAccountsModal.addEventListener("click", () => elements.accountsModal.classList.add("hidden"));
+  elements.closeAccountsModal.addEventListener("click", closeAccountsModal);
 }
 if (elements.cancelAccountsModal) {
-  elements.cancelAccountsModal.addEventListener("click", () => elements.accountsModal.classList.add("hidden"));
+  elements.cancelAccountsModal.addEventListener("click", closeAccountsModal);
+}
+if (elements.closeAccountSkinPanel) {
+  elements.closeAccountSkinPanel.addEventListener("click", () => {
+    state.skinEditorAccountId = null;
+    renderAccountsModal();
+  });
+}
+if (elements.accountsModal) {
+  elements.accountsModal.addEventListener("click", (event) => {
+    if (event.target === elements.accountsModal) {
+      closeAccountsModal();
+    }
+  });
 }
 if (elements.btnShowLog) {
   elements.btnShowLog.addEventListener("click", () => {

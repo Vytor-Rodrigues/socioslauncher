@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("launcherApi", {
   addLocalAccount: (username) => ipcRenderer.invoke("account:addLocal", username),
   removeAccount: (payload) => ipcRenderer.invoke("account:remove", payload),
   setActiveAccount: (accountId) => ipcRenderer.invoke("account:setActive", accountId),
+  getCraftySkins: (options) => ipcRenderer.invoke("account:craftySkins", options),
+  updateAccountSkin: (payload) => ipcRenderer.invoke("account:updateSkin", payload),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
   installMinecraft: (payload) => ipcRenderer.invoke("minecraft:install", payload),
   launchMinecraft: (payload) => ipcRenderer.invoke("minecraft:launch", payload),
