@@ -747,6 +747,9 @@ function renderModpacks() {
   state.modpacks.forEach((modpack) => {
     const card = document.createElement("article");
     card.className = "modpack-item";
+    if (state.selected && state.selected.projectId === modpack.projectId) {
+      card.classList.add("selected");
+    }
 
     const gameVersions = (modpack.gameVersions || []).slice(0, 3).join(", ");
     const categories = (modpack.categories || []).slice(0, 4);
@@ -806,8 +809,18 @@ function renderSelected() {
     return;
   }
 
-  elements.selectedVersion.textContent = versionDisplayName(state.selected);
-  elements.selectedMeta.textContent = versionDescription(state.selected);
+  // Se for um modpack do Modrinth (tem projectId, não tem id de versão)
+  if (state.selected.projectId && !state.selected.minecraftVersion) {
+    elements.selectedVersion.textContent = escapeHtml(state.selected.title || "Modpack");
+    const meta = [
+      state.selected.author ? `por ${state.selected.author}` : "",
+      `${formatCompactNumber(state.selected.downloads)} downloads`
+    ].filter(Boolean).join(" - ");
+    elements.selectedMeta.textContent = meta || "Modpack do Modrinth";
+  } else {
+    elements.selectedVersion.textContent = versionDisplayName(state.selected);
+    elements.selectedMeta.textContent = versionDescription(state.selected);
+  }
   syncActionButtons();
 }
 
@@ -955,6 +968,10 @@ function setActiveTab(tab) {
 
 async function startModpackInstall(modpack) {
   if (!modpack?.projectId) return;
+
+  // Marcar o modpack como selecionado no painel de seleção
+  state.selected = modpack;
+  renderSelected();
 
   state.installingModpackId = modpack.projectId;
   setBusy(true);
