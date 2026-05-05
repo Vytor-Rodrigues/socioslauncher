@@ -7,15 +7,24 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div class="titlebar">
+      <div class="titlebar-left">
+        <div class="titlebar-brand">
+          <img class="titlebar-logo" src="../../logosocios.png" alt="Logo" />
+          <span>Socios Client</span>
+        </div>
+      </div>
+      <div class="titlebar-right">
+        <div class="window-controls">
+          <button id="win-min" class="win-btn" type="button" aria-label="Minimize">—</button>
+          <button id="win-max" class="win-btn" type="button" aria-label="Maximize">□</button>
+          <button id="win-close" class="win-btn win-close" type="button" aria-label="Close">✕</button>
+        </div>
+      </div>
+    </div>
     <div class="app-shell">
       <aside class="sidebar">
-        <header class="brand">
-          <img class="brand-mark" src="../../logosocios.png" alt="Logo Socios Client" />
-          <div>
-            <h1>Socios Client</h1>
-            <p>Java Client</p>
-          </div>
-        </header>
+
 
         <section class="sidebar-nav">
           <button id="nav-versions" class="nav-button active" type="button">Versoes</button>
@@ -27,17 +36,16 @@
             <span>Conta</span>
             <span id="account-status" class="status-pill">Offline</span>
           </div>
-          <div id="account-view" class="account-view">
+          <div id="account-view" class="account-view" style="display: flex; align-items: center; gap: 12px; cursor: pointer; padding: 6px; margin: -6px; border-radius: 8px; transition: background 0.15s;">
             <div class="avatar">?</div>
-            <div>
+            <div style="flex: 1; overflow: hidden;">
               <strong>Nenhuma conta</strong>
               <small>Microsoft ou local</small>
             </div>
+            <svg id="account-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transition: transform 0.2s; color: var(--muted);"><polyline points="6 9 12 15 18 9"></polyline></svg>
           </div>
-          <div class="button-row account-actions">
-            <button id="add-account" class="primary">Microsoft</button>
-            <button id="add-local-account" class="secondary">Conta local</button>
-            <button id="remove-account" class="secondary">Remover</button>
+          <div id="account-dropdown" class="hidden" style="margin-top: 16px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 16px;">
+            <button id="manage-accounts-btn" class="secondary">Gerenciar contas</button>
           </div>
         </section>
 
@@ -65,29 +73,43 @@
               <input id="window-height" type="number" min="480" max="2160" />
             </label>
           </div>
-          <label class="full-field">
+          <label class="full-field hidden">
             Java
             <input id="java-path" type="text" placeholder="java" />
           </label>
-          <label class="full-field">
+          <label class="full-field hidden">
             Java 8 (opcional)
             <input id="java8-path" type="text" placeholder="C:\\Path\\to\\java8\\javaw.exe" />
           </label>
-          <label class="full-field">
+          <label class="full-field hidden">
             Tamanho do log (px)
             <input id="log-size" type="number" min="8" max="36" />
           </label>
         </section>
 
-        <button id="open-folder" class="ghost full-button">Abrir pasta</button>
+        <div style="margin-top: auto; display: flex; flex-direction: column; gap: 8px;">
+          <button id="open-folder" class="ghost">Abrir pasta</button>
+          <button id="btn-show-log" class="ghost">Ver Log</button>
+        </div>
       </aside>
 
       <main class="content">
         <section class="topbar">
           <div>
-            <h2 id="topbar-title">Versoes</h2>
+            <h2 id="topbar-title">Versões</h2>
             <p id="latest-line">Carregando manifesto...</p>
           </div>
+          
+          <div id="top-progress-box" class="progress-box idle" style="flex: 1; max-width: 400px; margin: 0 20px;">
+            <div class="progress-header">
+              <span id="top-progress-label">Aguardando</span>
+              <span id="top-progress-percent">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="top-progress-bar" class="progress-bar"></div>
+            </div>
+          </div>
+
           <div class="top-actions">
             <select id="version-filter" aria-label="Filtro de versoes">
               <option value="installed">Instaladas</option>
@@ -104,21 +126,190 @@
 
         <section id="launcher-grid" class="launcher-grid">
           <div class="version-panel">
-            <div id="modpack-subtabs" class="subtab-row hidden">
-              <button id="modpacks-search-tab" class="nav-button active" type="button">
-                Pesquise
-              </button>
-              <button id="modpacks-downloaded-tab" class="nav-button" type="button">
-                Baixados
-              </button>
-            </div>
-            <div class="search-row">
-              <input
-                id="version-search"
-                type="search"
-                placeholder="Buscar versao"
-                autocomplete="off"
-              />
+            <div class="version-panel-header" style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; align-items: center; position: relative;">
+              <div id="modpack-subtabs" class="subtab-row hidden" style="margin-bottom: 0; display: flex; gap: 10px;">
+                <button id="modpacks-search-tab" class="nav-button active" type="button">
+                  Pesquise
+                </button>
+                <button id="modpacks-downloaded-tab" class="nav-button" type="button">
+                  Baixados
+                </button>
+              </div>
+              <div class="search-row" style="margin-bottom: 0; flex: 1; display: flex; gap: 6px; align-items: center;">
+                <input
+                  id="version-search"
+                  type="search"
+                  autocomplete="off"
+                  style="flex: 1;"
+                />
+                <button id="modpack-filter-btn" class="ghost icon-button small-icon-button hidden" type="button" aria-label="Filtros" title="Filtros">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                </button>
+              </div>
+              <div id="modpack-filters" class="modpack-filters hidden">
+                <div class="filter-group">
+                  <span class="filter-label">Loader</span>
+                  <div class="filter-chips">
+                    <button class="filter-chip" data-filter="loader" data-value="fabric" type="button">Fabric</button>
+                    <button class="filter-chip" data-filter="loader" data-value="forge" type="button">Forge</button>
+                    <button class="filter-chip" data-filter="loader" data-value="neoforge" type="button">NeoForge</button>
+                    <button class="filter-chip" data-filter="loader" data-value="quilt" type="button">Quilt</button>
+                  </div>
+                </div>
+                <div class="filter-group">
+                  <span class="filter-label">Versão MC</span>
+                  <select id="modpack-filter-version" class="filter-version-select">
+                    <option value="">Todas as versões</option>
+                    <optgroup label="Mais recentes (2026)">
+                      <option value="26.1.2">26.1.2</option>
+                      <option value="26.1.1">26.1.1</option>
+                      <option value="26.1">26.1</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.21">
+                      <option value="1.21.11">1.21.11</option>
+                      <option value="1.21.10">1.21.10</option>
+                      <option value="1.21.9">1.21.9</option>
+                      <option value="1.21.8">1.21.8</option>
+                      <option value="1.21.7">1.21.7</option>
+                      <option value="1.21.6">1.21.6</option>
+                      <option value="1.21.5">1.21.5</option>
+                      <option value="1.21.4">1.21.4</option>
+                      <option value="1.21.3">1.21.3</option>
+                      <option value="1.21.2">1.21.2</option>
+                      <option value="1.21.1">1.21.1</option>
+                      <option value="1.21">1.21</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.20">
+                      <option value="1.20.6">1.20.6</option>
+                      <option value="1.20.5">1.20.5</option>
+                      <option value="1.20.4">1.20.4</option>
+                      <option value="1.20.3">1.20.3</option>
+                      <option value="1.20.2">1.20.2</option>
+                      <option value="1.20.1">1.20.1</option>
+                      <option value="1.20">1.20</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.19">
+                      <option value="1.19.4">1.19.4</option>
+                      <option value="1.19.3">1.19.3</option>
+                      <option value="1.19.2">1.19.2</option>
+                      <option value="1.19.1">1.19.1</option>
+                      <option value="1.19">1.19</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.18">
+                      <option value="1.18.2">1.18.2</option>
+                      <option value="1.18.1">1.18.1</option>
+                      <option value="1.18">1.18</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.17">
+                      <option value="1.17.1">1.17.1</option>
+                      <option value="1.17">1.17</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.16">
+                      <option value="1.16.5">1.16.5</option>
+                      <option value="1.16.4">1.16.4</option>
+                      <option value="1.16.3">1.16.3</option>
+                      <option value="1.16.2">1.16.2</option>
+                      <option value="1.16.1">1.16.1</option>
+                      <option value="1.16">1.16</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.15">
+                      <option value="1.15.2">1.15.2</option>
+                      <option value="1.15.1">1.15.1</option>
+                      <option value="1.15">1.15</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.14">
+                      <option value="1.14.4">1.14.4</option>
+                      <option value="1.14.3">1.14.3</option>
+                      <option value="1.14.2">1.14.2</option>
+                      <option value="1.14.1">1.14.1</option>
+                      <option value="1.14">1.14</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.13">
+                      <option value="1.13.2">1.13.2</option>
+                      <option value="1.13.1">1.13.1</option>
+                      <option value="1.13">1.13</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.12">
+                      <option value="1.12.2">1.12.2</option>
+                      <option value="1.12.1">1.12.1</option>
+                      <option value="1.12">1.12</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.11">
+                      <option value="1.11.2">1.11.2</option>
+                      <option value="1.11.1">1.11.1</option>
+                      <option value="1.11">1.11</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.10">
+                      <option value="1.10.2">1.10.2</option>
+                      <option value="1.10.1">1.10.1</option>
+                      <option value="1.10">1.10</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.9">
+                      <option value="1.9.4">1.9.4</option>
+                      <option value="1.9.3">1.9.3</option>
+                      <option value="1.9.2">1.9.2</option>
+                      <option value="1.9.1">1.9.1</option>
+                      <option value="1.9">1.9</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.8">
+                      <option value="1.8.9">1.8.9</option>
+                      <option value="1.8.8">1.8.8</option>
+                      <option value="1.8.7">1.8.7</option>
+                      <option value="1.8.6">1.8.6</option>
+                      <option value="1.8.5">1.8.5</option>
+                      <option value="1.8.4">1.8.4</option>
+                      <option value="1.8.3">1.8.3</option>
+                      <option value="1.8.2">1.8.2</option>
+                      <option value="1.8.1">1.8.1</option>
+                      <option value="1.8">1.8</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.7">
+                      <option value="1.7.10">1.7.10</option>
+                      <option value="1.7.9">1.7.9</option>
+                      <option value="1.7.8">1.7.8</option>
+                      <option value="1.7.7">1.7.7</option>
+                      <option value="1.7.6">1.7.6</option>
+                      <option value="1.7.5">1.7.5</option>
+                      <option value="1.7.4">1.7.4</option>
+                      <option value="1.7.3">1.7.3</option>
+                      <option value="1.7.2">1.7.2</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.6">
+                      <option value="1.6.4">1.6.4</option>
+                      <option value="1.6.2">1.6.2</option>
+                      <option value="1.6.1">1.6.1</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.5">
+                      <option value="1.5.2">1.5.2</option>
+                      <option value="1.5.1">1.5.1</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.4">
+                      <option value="1.4.7">1.4.7</option>
+                      <option value="1.4.6">1.4.6</option>
+                      <option value="1.4.5">1.4.5</option>
+                      <option value="1.4.4">1.4.4</option>
+                      <option value="1.4.2">1.4.2</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.3">
+                      <option value="1.3.2">1.3.2</option>
+                      <option value="1.3.1">1.3.1</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.2">
+                      <option value="1.2.5">1.2.5</option>
+                      <option value="1.2.4">1.2.4</option>
+                      <option value="1.2.3">1.2.3</option>
+                      <option value="1.2.2">1.2.2</option>
+                      <option value="1.2.1">1.2.1</option>
+                    </optgroup>
+                    <optgroup label="Versão 1.1">
+                      <option value="1.1">1.1</option>
+                    </optgroup>
+                    <optgroup label="Primeira versão oficial">
+                      <option value="1.0">1.0</option>
+                    </optgroup>
+                  </select>
+                </div>
+              </div>
             </div>
             <div id="version-list" class="version-list"></div>
           </div>
@@ -165,13 +356,7 @@
           </div>
         </section>
 
-        <section class="log-panel">
-          <div class="panel-title">
-            <span>Log</span>
-            <button id="clear-log" class="ghost small-button">Limpar</button>
-          </div>
-          <pre id="log-output"></pre>
-        </section>
+
       </main>
     </div>
 
@@ -228,6 +413,30 @@
 
         <div class="modal-actions">
           <button id="cancel-modpack-version" class="ghost" type="button">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="accounts-modal" class="modal-backdrop hidden" aria-hidden="true">
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <div>
+            <h3>Gerenciar contas</h3>
+            <p>Escolha uma conta para jogar ou adicione novas contas.</p>
+          </div>
+          <button id="close-accounts-modal" class="ghost icon-button" type="button">×</button>
+        </div>
+
+        <div class="modal-body" style="min-height: 150px; max-height: 400px; overflow-y: auto;">
+          <div id="accounts-list" style="display: flex; flex-direction: column; gap: 8px;"></div>
+        </div>
+
+        <div class="modal-actions" style="justify-content: space-between;">
+          <div style="display: flex; gap: 8px;">
+            <button id="add-account" class="primary">Microsoft</button>
+            <button id="add-local-account-btn" class="secondary">Conta local</button>
+          </div>
+          <button id="cancel-accounts-modal" class="ghost" type="button">Fechar</button>
         </div>
       </div>
     </div>

@@ -20,6 +20,18 @@ const state = {
   progressMode: "idle",
   progressValue: 0,
   progressResetTimer: null,
+  modpackFilters: { loader: "", gameVersion: "" },
+  modpackFiltersOpen: false,
+  // Download tracking for progress bar
+  downloadModpackName: "",
+  downloadStartTime: 0,
+  downloadedBytes: 0,
+  downloadTotalBytes: 0,
+  downloadFilesDone: 0,
+  downloadFilesTotal: 0,
+  downloadLastSpeedBytes: 0,
+  downloadLastSpeedTime: 0,
+  downloadSpeed: 0,
 };
 
 const elements = {
@@ -29,9 +41,15 @@ const elements = {
   browseMode: document.querySelector("#browse-mode"),
   accountStatus: document.querySelector("#account-status"),
   accountView: document.querySelector("#account-view"),
+  accountDropdown: document.querySelector("#account-dropdown"),
+  accountChevron: document.querySelector("#account-chevron"),
+  manageAccountsBtn: document.querySelector("#manage-accounts-btn"),
   addAccount: document.querySelector("#add-account"),
-  addLocalAccount: document.querySelector("#add-local-account"),
-  removeAccount: document.querySelector("#remove-account"),
+  addLocalAccountBtn: document.querySelector("#add-local-account-btn"),
+  accountsModal: document.querySelector("#accounts-modal"),
+  closeAccountsModal: document.querySelector("#close-accounts-modal"),
+  cancelAccountsModal: document.querySelector("#cancel-accounts-modal"),
+  accountsList: document.querySelector("#accounts-list"),
   localAccountModal: document.querySelector("#local-account-modal"),
   closeLocalAccountModal: document.querySelector("#close-local-account-modal"),
   cancelLocalAccount: document.querySelector("#cancel-local-account"),
@@ -72,11 +90,22 @@ const elements = {
   progressLabel: document.querySelector("#progress-label"),
   progressPercent: document.querySelector("#progress-percent"),
   progressBar: document.querySelector("#progress-bar"),
+  topProgressBox: document.querySelector("#top-progress-box"),
+  topProgressLabel: document.querySelector("#top-progress-label"),
+  topProgressPercent: document.querySelector("#top-progress-percent"),
+  topProgressBar: document.querySelector("#top-progress-bar"),
   minecraftPath: document.querySelector("#minecraft-path"),
   clearLog: document.querySelector("#clear-log"),
   logOutput: document.querySelector("#log-output"),
   java8Path: document.querySelector("#java8-path"),
   logSize: document.querySelector("#log-size"),
+  modpackFilterBtn: document.querySelector("#modpack-filter-btn"),
+  modpackFiltersPanel: document.querySelector("#modpack-filters"),
+  modpackFilterVersion: document.querySelector("#modpack-filter-version"),
+  winMin: document.querySelector("#win-min"),
+  winMax: document.querySelector("#win-max"),
+  winClose: document.querySelector("#win-close"),
+  btnShowLog: document.querySelector("#btn-show-log"),
 };
 
 function formatDate(value) {
@@ -88,11 +117,9 @@ function formatDate(value) {
 }
 
 function appendLog(type, message) {
-  const prefix = type ? `[${type}]` : "[log]";
-  const line = `${new Date().toLocaleTimeString("pt-BR")} ${prefix} ${message}`;
-  elements.logOutput.textContent +=
-    elements.logOutput.textContent.length > 0 ? `\n${line}` : line;
-  elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
+  if (api.appendLog) {
+    api.appendLog(type, message);
+  }
 }
 
 function setBusy(value) {
@@ -151,12 +178,57 @@ function clearSelectedVersion() {
   renderCatalog();
 }
 
+let _playPanelLeaveTimer = null;
+let _playPanelVisible = false;
+
+function animatePlayPanel(show) {
+  const panel = elements.playPanel;
+  if (!panel) return;
+
+  if (show) {
+    // Cancel any pending hide
+    if (_playPanelLeaveTimer) {
+      clearTimeout(_playPanelLeaveTimer);
+      _playPanelLeaveTimer = null;
+    }
+
+    // Restore grid layout immediately so it animates while panel slides in
+    elements.launcherGrid.classList.remove("no-selection");
+
+    if (_playPanelVisible) {
+      // Panel already open — no animation needed
+      panel.classList.remove("hidden", "leaving", "entering");
+      return;
+    }
+
+    // First selection (or after closing): play slide-in
+    _playPanelVisible = true;
+    panel.classList.remove("hidden", "leaving");
+    void panel.offsetWidth;
+    panel.classList.add("entering");
+    panel.addEventListener("animationend", () => {
+      panel.classList.remove("entering");
+    }, { once: true });
+  } else {
+    if (panel.classList.contains("hidden")) return;
+    _playPanelVisible = false;
+    panel.classList.remove("entering");
+    panel.classList.add("leaving");
+    // Collapse grid column immediately — CSS transition animates it
+    elements.launcherGrid.classList.add("no-selection");
+    _playPanelLeaveTimer = setTimeout(() => {
+      panel.classList.add("hidden");
+      panel.classList.remove("leaving");
+      _playPanelLeaveTimer = null;
+    }, 750);
+  }
+}
+
 function syncActionButtons() {
   const hasSelection = Boolean(state.selected);
   const canInstall = canInstallSelectedVersion();
 
-  elements.launcherGrid.classList.toggle("no-selection", !hasSelection);
-  elements.playPanel.classList.toggle("hidden", !hasSelection);
+  animatePlayPanel(hasSelection);
   elements.selectedPanel.classList.toggle("hidden", !hasSelection);
   elements.installVersion.hidden = !canInstall;
   elements.installVersion.disabled = state.busy || !canInstall;
@@ -292,7 +364,7 @@ async function submitLocalAccount() {
   try {
     state.account = await api.addLocalAccount(normalized);
     closeLocalAccountModal();
-    renderAccount();
+    await refreshState();
   } catch (error) {
     appendLog("error", error.message || String(error));
     elements.localAccountHint.textContent = error.message || String(error);
@@ -300,7 +372,6 @@ async function submitLocalAccount() {
   } finally {
     setBusy(false);
     updateLocalAccountHint();
-    renderAccount();
   }
 }
 
@@ -336,31 +407,80 @@ function applySettings(settings) {
 }
 
 function renderAccount() {
-  if (!state.account) {
-    elements.accountStatus.textContent = "Offline";
-    elements.accountStatus.classList.remove("online");
+  if (state.account) {
+    const avatarUrl =
+      state.account.type === "microsoft"
+        ? `https://minotar.net/helm/${state.account.id}/64.png`
+        : `https://minotar.net/helm/MHF_Steve/64.png`;
+    elements.accountView.innerHTML = `
+      <img src="${avatarUrl}" class="avatar" alt="Avatar">
+      <div style="flex: 1; overflow: hidden;">
+        <strong>${state.account.name}</strong>
+        <small>${state.account.type === "microsoft" ? "Microsoft" : "Local"}</small>
+      </div>
+      <svg id="account-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transition: transform 0.2s; color: var(--muted);"><polyline points="6 9 12 15 18 9"></polyline></svg>
+    `;
+    elements.accountStatus.textContent = "Online";
+    elements.accountStatus.className = "status-pill status-online";
+  } else {
     elements.accountView.innerHTML = `
       <div class="avatar">?</div>
-      <div>
+      <div style="flex: 1; overflow: hidden;">
         <strong>Nenhuma conta</strong>
-        <small>Microsoft ou local</small>
+        <small>Adicione ou selecione</small>
       </div>
+      <svg id="account-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transition: transform 0.2s; color: var(--muted);"><polyline points="6 9 12 15 18 9"></polyline></svg>
     `;
-    elements.removeAccount.disabled = true || state.busy;
-    return;
+    elements.accountStatus.textContent = "Offline";
+    elements.accountStatus.className = "status-pill status-offline";
   }
 
-  const isLocal = state.account.type === "local";
-  elements.accountStatus.textContent = isLocal ? "Local" : "Online";
-  elements.accountStatus.classList.add("online");
-  elements.accountView.innerHTML = `
-    <div class="avatar">${state.account.name.slice(0, 1).toUpperCase()}</div>
-    <div>
-      <strong>${escapeHtml(state.account.name)}</strong>
-      <small>${isLocal ? "Conta local" : "Microsoft/Minecraft"}</small>
+  // Restore the chevron listener reference
+  elements.accountChevron = document.querySelector("#account-chevron");
+  
+  if (elements.accountsModal && !elements.accountsModal.classList.contains("hidden")) {
+    renderAccountsModal();
+  }
+}
+
+function renderAccountsModal() {
+  if (!elements.accountsList) return;
+  const accounts = state.accounts || [];
+  if (accounts.length === 0) {
+    elements.accountsList.innerHTML = `<div style="padding: 16px; text-align: center; color: var(--muted);">Nenhuma conta adicionada.</div>`;
+    return;
+  }
+  
+  elements.accountsList.innerHTML = accounts.map(acc => `
+    <div class="account-item" style="display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--surface-2); border: 1px solid ${acc.isActive ? 'var(--primary)' : 'var(--line)'}; border-radius: 8px; cursor: pointer;" data-id="${acc.accountId}">
+      <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
+        <img src="https://minotar.net/helm/${acc.type === 'microsoft' ? acc.id : 'MHF_Steve'}/32.png" style="width: 32px; height: 32px; border-radius: 4px;">
+        <div style="display: flex; flex-direction: column;">
+          <strong style="color: ${acc.isActive ? 'var(--primary)' : 'var(--text)'};">${acc.name}</strong>
+          <small style="color: var(--muted); font-size: 11px;">${acc.type === 'microsoft' ? 'Microsoft' : 'Local'}</small>
+        </div>
+      </div>
+      ${acc.isActive ? '<span style="font-size: 11px; padding: 2px 6px; background: var(--primary); color: white; border-radius: 4px; margin-right: 8px;">Ativa</span>' : ''}
+      <button class="ghost icon-button small-icon-button btn-remove-account" data-id="${acc.accountId}" aria-label="Remover">×</button>
     </div>
-  `;
-  elements.removeAccount.disabled = state.busy;
+  `).join("");
+  
+  elements.accountsList.querySelectorAll('.account-item').forEach(el => {
+    el.addEventListener('click', async (e) => {
+      if (e.target.closest('.btn-remove-account')) return;
+      const id = el.getAttribute('data-id');
+      await api.setActiveAccount(id);
+      await refreshState();
+    });
+  });
+  
+  elements.accountsList.querySelectorAll('.btn-remove-account').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-id');
+      await api.removeAccount({ accountId: id });
+      await refreshState();
+    });
+  });
 }
 
 function versionLabel(version) {
@@ -386,8 +506,14 @@ function isDownloadedModpack(version) {
 }
 
 function downloadedModpacks() {
+  const query = elements.versionSearch ? elements.versionSearch.value.trim().toLowerCase() : "";
   return state.versions
     .filter((version) => isDownloadedModpack(version) && (version.installed || version.local))
+    .filter((version) => 
+        !query || 
+        version.id.toLowerCase().includes(query) || 
+        String(version.modpackTitle || "").toLowerCase().includes(query)
+    )
     .sort(compareVersions);
 }
 
@@ -707,33 +833,56 @@ function renderLatest() {
       "active",
       state.activeModpacksTab === "downloaded"
     );
-    elements.refreshVersions.textContent =
-      state.activeModpacksTab === "search" ? "Buscar" : "Atualizar";
-    elements.versionSearch.placeholder = "Buscar modpack no Modrinth";
-    elements.versionSearch.parentElement.classList.toggle(
-      "hidden",
-      state.activeModpacksTab !== "search"
-    );
+    elements.refreshVersions.classList.add("hidden");
+    elements.versionSearch.parentElement.classList.remove("hidden");
+    // Show the filter button for all modpack tabs
+    if (elements.modpackFilterBtn) {
+      elements.modpackFilterBtn.classList.remove("hidden");
+    }
+    renderModpackFilterUI();
     return;
   }
 
-  elements.topbarTitle.textContent = "Versoes";
-  if (!state.latest) {
-    elements.latestLine.textContent = "Manifesto nao carregado";
-  } else {
-    elements.latestLine.textContent = `Latest release ${state.latest.release} / snapshot ${state.latest.snapshot}`;
-  }
+  elements.topbarTitle.textContent = "Versões";
+  elements.latestLine.textContent = "";
   elements.versionFilter.classList.remove("hidden");
   elements.modpackSubtabs.classList.add("hidden");
   elements.versionSearch.parentElement.classList.remove("hidden");
+  elements.refreshVersions.classList.remove("hidden");
   elements.refreshVersions.textContent = "Atualizar";
-  elements.versionSearch.placeholder = "Buscar versao";
+  if (elements.modpackFilterBtn) {
+    elements.modpackFilterBtn.classList.add("hidden");
+  }
+  if (elements.modpackFiltersPanel) {
+    state.modpackFiltersOpen = false;
+    elements.modpackFiltersPanel.classList.add("hidden");
+  }
 }
 
 function clearModpackSearchTimer() {
   if (state.modpackSearchTimer) {
     clearTimeout(state.modpackSearchTimer);
     state.modpackSearchTimer = null;
+  }
+}
+
+function hasActiveModpackFilters() {
+  return Boolean(state.modpackFilters.loader || state.modpackFilters.gameVersion);
+}
+
+function renderModpackFilterUI() {
+  if (!elements.modpackFiltersPanel) return;
+  // Sync chip active states
+  elements.modpackFiltersPanel.querySelectorAll(".filter-chip[data-filter='loader']").forEach((chip) => {
+    chip.classList.toggle("active", chip.dataset.value === state.modpackFilters.loader);
+  });
+  // Sync version select
+  if (elements.modpackFilterVersion) {
+    elements.modpackFilterVersion.value = state.modpackFilters.gameVersion || "";
+  }
+  // Sync funnel button active state
+  if (elements.modpackFilterBtn) {
+    elements.modpackFilterBtn.classList.toggle("active", hasActiveModpackFilters());
   }
 }
 
@@ -744,7 +893,7 @@ async function refreshModpacks(query = state.modpackQuery) {
   renderCatalog();
 
   try {
-    const result = await api.searchModpacks(state.modpackQuery);
+    const result = await api.searchModpacks(state.modpackQuery, state.modpackFilters);
     state.modpacks = result.hits || [];
     state.modpackTotalHits = result.totalHits || state.modpacks.length;
   } catch (error) {
@@ -869,10 +1018,18 @@ function clearProgress() {
   cancelProgressReset();
   state.progressMode = "idle";
   state.progressValue = 0;
+  
   elements.progressBox.classList.add("idle");
   elements.progressLabel.textContent = "";
   elements.progressPercent.textContent = "";
   elements.progressBar.style.width = "0%";
+
+  if (elements.topProgressBox) {
+    elements.topProgressBox.classList.add("idle");
+    elements.topProgressLabel.textContent = "";
+    elements.topProgressPercent.textContent = "";
+    elements.topProgressBar.style.width = "0%";
+  }
 }
 
 function scheduleProgressClear(delay = 0) {
@@ -892,10 +1049,20 @@ function setProgress(label, percent, mode = state.progressMode || "download") {
   const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
   state.progressMode = mode;
   state.progressValue = safePercent;
-  elements.progressBox.classList.remove("idle");
-  elements.progressLabel.textContent = label;
-  elements.progressPercent.textContent = `${safePercent}%`;
-  elements.progressBar.style.width = `${safePercent}%`;
+  
+  if (mode === "install" || mode === "download") {
+    if (elements.topProgressBox) {
+      elements.topProgressBox.classList.remove("idle");
+      elements.topProgressLabel.textContent = label;
+      elements.topProgressPercent.textContent = `${safePercent}%`;
+      elements.topProgressBar.style.width = `${safePercent}%`;
+    }
+  } else {
+    elements.progressBox.classList.remove("idle");
+    elements.progressLabel.textContent = label;
+    elements.progressPercent.textContent = `${safePercent}%`;
+    elements.progressBar.style.width = `${safePercent}%`;
+  }
 }
 
 function bumpLaunchProgress(percent, label) {
@@ -939,12 +1106,171 @@ function handleLaunchDebugProgress(message) {
   if (text.includes("launching with arguments")) return bumpLaunchProgress(96, "Abrindo jogo");
 }
 
+function formatBytes(bytes) {
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, i);
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatSpeed(bytesPerSecond) {
+  if (bytesPerSecond <= 0) return "";
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatETA(seconds) {
+  if (!seconds || seconds <= 0 || !isFinite(seconds)) return "";
+  if (seconds < 60) return `${Math.ceil(seconds)}s restantes`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.ceil(seconds % 60);
+  if (mins < 60) return `${mins}m ${secs}s restantes`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hours}h ${remMins}m restantes`;
+}
+
+function updateDownloadSpeed(downloadedBytes) {
+  const now = Date.now();
+  const elapsed = now - state.downloadLastSpeedTime;
+  if (elapsed >= 500) {
+    const bytesDelta = downloadedBytes - state.downloadLastSpeedBytes;
+    state.downloadSpeed = Math.max(0, (bytesDelta / elapsed) * 1000);
+    state.downloadLastSpeedBytes = downloadedBytes;
+    state.downloadLastSpeedTime = now;
+  }
+}
+
+function computeETA(downloadedBytes, totalBytes) {
+  if (!state.downloadSpeed || state.downloadSpeed <= 0 || downloadedBytes >= totalBytes) return 0;
+  const remainingBytes = totalBytes - downloadedBytes;
+  return remainingBytes / state.downloadSpeed;
+}
+
+function setDownloadProgress(modpackName, percent, downloadedBytes, totalBytes, filesDone, filesTotal) {
+  cancelProgressReset();
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+  state.progressMode = "install";
+  state.progressValue = safePercent;
+  state.downloadModpackName = modpackName;
+
+  updateDownloadSpeed(downloadedBytes);
+  const eta = computeETA(downloadedBytes, totalBytes);
+
+  // Build label with modpack name
+  const label = `Baixando: ${modpackName}`;
+
+  // Build detailed info string
+  const parts = [];
+  if (totalBytes > 0) {
+    parts.push(`${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`);
+  }
+  if (filesTotal > 0) {
+    parts.push(`${filesDone}/${filesTotal} arquivos`);
+  }
+  const speedStr = formatSpeed(state.downloadSpeed);
+  if (speedStr) parts.push(speedStr);
+  const etaStr = formatETA(eta);
+  if (etaStr) parts.push(etaStr);
+
+  const detailText = parts.length ? parts.join(" • ") : "";
+
+  // Update top progress bar (the global one)
+  if (elements.topProgressBox) {
+    elements.topProgressBox.classList.remove("idle");
+    elements.topProgressLabel.textContent = label;
+    elements.topProgressPercent.textContent = `${safePercent}%`;
+    elements.topProgressBar.style.width = `${safePercent}%`;
+
+    // Update or create detail element
+    let detailEl = elements.topProgressBox.querySelector(".progress-detail");
+    if (!detailEl) {
+      detailEl = document.createElement("span");
+      detailEl.className = "progress-detail";
+      const header = elements.topProgressBox.querySelector(".progress-header");
+      if (header) header.appendChild(detailEl);
+    }
+    detailEl.textContent = detailText;
+  }
+}
+
 function handleLauncherEvent(event) {
   if (!event.silent) appendLog(event.type, event.message);
 
   if (event.type === "install") {
     setBusy(true);
-    setProgress(event.message, 0, "install");
+    // Use modpack name from event message if available, otherwise from state
+    const modpackName = state.downloadModpackName || state.selected?.modpackTitle || state.selected?.id || "Minecraft";
+    setProgress(`Baixando: ${modpackName}`, 0, "install");
+  }
+
+  if (event.type === "install-start") {
+    setBusy(true);
+    const modpackName = event.modpackName || "Modpack";
+    state.downloadModpackName = modpackName;
+    state.downloadStartTime = Date.now();
+    state.downloadedBytes = 0;
+    state.downloadTotalBytes = event.totalBytes || 0;
+    state.downloadFilesDone = 0;
+    state.downloadFilesTotal = event.filesTotal || 0;
+    state.downloadLastSpeedBytes = 0;
+    state.downloadLastSpeedTime = Date.now();
+    state.downloadSpeed = 0;
+    setDownloadProgress(modpackName, 0, 0, state.downloadTotalBytes, 0, state.downloadFilesTotal);
+  }
+
+  if (event.type === "install-progress") {
+    const modpackName = event.modpackName || state.downloadModpackName || "Modpack";
+    const filesDone = event.filesDone || 0;
+    const filesTotal = event.filesTotal || state.downloadFilesTotal || 1;
+    const downloadedBytes = event.downloadedBytes || 0;
+    const totalBytes = event.totalBytes || state.downloadTotalBytes || 0;
+    state.downloadedBytes = downloadedBytes;
+    state.downloadFilesDone = filesDone;
+
+    // Use file-based progress as fallback if byte totals not available
+    let percent;
+    if (totalBytes > 0) {
+      percent = (downloadedBytes / totalBytes) * 100;
+    } else {
+      percent = filesTotal > 0 ? (filesDone / filesTotal) * 100 : 0;
+    }
+
+    setDownloadProgress(modpackName, percent, downloadedBytes, totalBytes, filesDone, filesTotal);
+  }
+
+  if (event.type === "download-status" && event.global) {
+    // Real-time per-chunk progress during modpack install
+    const g = event.global;
+    const modpackName = state.downloadModpackName || "Modpack";
+    state.downloadedBytes = g.downloadedBytes || 0;
+
+    let percent;
+    if (g.totalBytes > 0) {
+      percent = (g.downloadedBytes / g.totalBytes) * 100;
+    } else if (g.filesTotal > 0) {
+      percent = (g.filesDone / g.filesTotal) * 100;
+    } else {
+      percent = 0;
+    }
+
+    setDownloadProgress(
+      modpackName,
+      percent,
+      g.downloadedBytes || 0,
+      g.totalBytes || state.downloadTotalBytes,
+      g.filesDone || state.downloadFilesDone,
+      g.filesTotal || state.downloadFilesTotal
+    );
+  }
+
+  if (event.type === "download-status" && !event.global && state.progressMode !== "install") {
+    // Non-modpack download (version install, etc.) — use regular progress
+    if (event.status) {
+      const { current, total, label } = event.status;
+      const percent = total ? Math.round((current / total) * 100) : 0;
+      setProgress(label || "Baixando", percent, state.progressMode || "download");
+    }
   }
 
   if (event.type === "launch") {
@@ -958,12 +1284,6 @@ function handleLauncherEvent(event) {
     setProgress(type, progressFromStage(type, percent, state.progressMode), state.progressMode);
   }
 
-  if (event.type === "download-status" && event.status) {
-    const { current, total, type } = event.status;
-    const percent = total ? Math.round((current / total) * 100) : 0;
-    setProgress(type || "Download", progressFromStage(type, percent, state.progressMode), state.progressMode);
-  }
-
   if (event.type === "debug") {
     handleLaunchDebugProgress(event.message);
   }
@@ -972,6 +1292,15 @@ function handleLauncherEvent(event) {
     if (state.progressMode === "launch") {
       setProgress("Jogo iniciado", 100, "launch");
       scheduleProgressClear(1200);
+    } else if (state.progressMode === "install") {
+      const modpackName = state.downloadModpackName || "Modpack";
+      setDownloadProgress(modpackName, 100, state.downloadTotalBytes, state.downloadTotalBytes, state.downloadFilesTotal, state.downloadFilesTotal);
+      // Clear download detail element
+      setTimeout(() => {
+        const detailEl = elements.topProgressBox?.querySelector(".progress-detail");
+        if (detailEl) detailEl.textContent = "";
+      }, 1500);
+      scheduleProgressClear(2000);
     } else {
       scheduleProgressClear(150);
     }
@@ -989,6 +1318,11 @@ function handleLauncherEvent(event) {
 
   if (event.type === "close" || event.type === "error") {
     setBusy(false);
+    // Clean up download detail element
+    const detailEl = elements.topProgressBox?.querySelector(".progress-detail");
+    if (detailEl) detailEl.textContent = "";
+    state.downloadModpackName = "";
+    state.downloadSpeed = 0;
     scheduleProgressClear();
   }
 }
@@ -1000,6 +1334,7 @@ async function refreshState(forceVersions = false) {
     const data = await api.getState();
     const manifest = forceVersions ? await api.refreshVersions() : data.versions;
     state.account = data.account;
+    state.accounts = data.accounts || [];
     state.busy = Boolean(data.busy);
     state.versions = manifest.versions;
     state.latest = manifest.latest;
@@ -1100,17 +1435,23 @@ async function uninstallSelectedVersion() {
 elements.addAccount.addEventListener("click", async () => {
   setBusy(true);
   try {
-    state.account = await api.addAccount();
-    renderAccount();
+    const newAcc = await api.addAccount();
+    if (newAcc) state.account = newAcc;
+    if (elements.accountsModal) elements.accountsModal.classList.add("hidden");
+    await refreshState();
   } catch (error) {
     appendLog("error", error.message || String(error));
   } finally {
     setBusy(false);
-    renderAccount();
   }
 });
 
-elements.addLocalAccount.addEventListener("click", openLocalAccountModal);
+if (elements.addLocalAccountBtn) {
+  elements.addLocalAccountBtn.addEventListener("click", () => {
+    if (elements.accountsModal) elements.accountsModal.classList.add("hidden");
+    openLocalAccountModal();
+  });
+}
 elements.closeLocalAccountModal.addEventListener("click", closeLocalAccountModal);
 elements.cancelLocalAccount.addEventListener("click", closeLocalAccountModal);
 elements.confirmLocalAccount.addEventListener("click", submitLocalAccount);
@@ -1153,19 +1494,6 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-elements.removeAccount.addEventListener("click", async () => {
-  setBusy(true);
-  try {
-    await api.removeAccount();
-    state.account = null;
-    renderAccount();
-  } catch (error) {
-    appendLog("error", error.message || String(error));
-  } finally {
-    setBusy(false);
-    renderAccount();
-  }
-});
 
 elements.refreshVersions.addEventListener("click", async () => {
   if (state.activeTab === "modpacks") {
@@ -1227,21 +1555,48 @@ elements.uninstallVersion.addEventListener("click", uninstallSelectedVersion);
 elements.launchVersion.addEventListener("click", () => runAction("launch"));
 elements.clearSelection.addEventListener("click", clearSelectedVersion);
 elements.openFolder.addEventListener("click", () => api.openMinecraftFolder());
-elements.clearLog.addEventListener("click", () => {
-  elements.logOutput.textContent = "";
+
+elements.accountView.addEventListener("click", () => {
+  if (elements.accountDropdown) {
+    const isHidden = elements.accountDropdown.classList.contains("hidden");
+    elements.accountDropdown.classList.toggle("hidden");
+    if (elements.accountChevron) {
+      elements.accountChevron.style.transform = isHidden ? "rotate(180deg)" : "rotate(0deg)";
+    }
+  }
 });
 
-elements.logSize.addEventListener("change", saveSettingsQuietly);
-elements.java8Path.addEventListener("change", saveSettingsQuietly);
+if (elements.manageAccountsBtn) {
+  elements.manageAccountsBtn.addEventListener("click", () => {
+    elements.accountDropdown.classList.add("hidden");
+    if (elements.accountChevron) elements.accountChevron.style.transform = "rotate(0deg)";
+    elements.accountsModal.classList.remove("hidden");
+    renderAccountsModal();
+  });
+}
+
+if (elements.closeAccountsModal) {
+  elements.closeAccountsModal.addEventListener("click", () => elements.accountsModal.classList.add("hidden"));
+}
+if (elements.cancelAccountsModal) {
+  elements.cancelAccountsModal.addEventListener("click", () => elements.accountsModal.classList.add("hidden"));
+}
+if (elements.btnShowLog) {
+  elements.btnShowLog.addEventListener("click", () => {
+    if (api.openLogWindow) api.openLogWindow();
+  });
+}
+
+if (elements.logSize) elements.logSize.addEventListener("change", saveSettingsQuietly);
+if (elements.java8Path) elements.java8Path.addEventListener("change", saveSettingsQuietly);
 
 [
   elements.minMemory,
   elements.maxMemory,
-  elements.javaPath,
   elements.windowWidth,
   elements.windowHeight,
 ].forEach((input) => {
-  input.addEventListener("change", saveSettingsQuietly);
+  if (input) input.addEventListener("change", saveSettingsQuietly);
 });
 
 if (elements.navVersions) {
@@ -1255,6 +1610,59 @@ if (elements.browseMode) {
     setActiveTab(elements.browseMode.value === "modpacks" ? "modpacks" : "versions");
   });
 }
+
+if (elements.winMin) elements.winMin.addEventListener("click", () => api.minimize());
+if (elements.winMax) elements.winMax.addEventListener("click", () => api.maximize());
+if (elements.winClose) elements.winClose.addEventListener("click", () => api.close());
+
+// --- Modpack filter panel ---
+if (elements.modpackFilterBtn) {
+  elements.modpackFilterBtn.addEventListener("click", () => {
+    state.modpackFiltersOpen = !state.modpackFiltersOpen;
+    if (elements.modpackFiltersPanel) {
+      elements.modpackFiltersPanel.classList.toggle("hidden", !state.modpackFiltersOpen);
+    }
+    elements.modpackFilterBtn.classList.toggle("active",
+      state.modpackFiltersOpen || hasActiveModpackFilters()
+    );
+  });
+}
+
+if (elements.modpackFiltersPanel) {
+  // Loader chip clicks
+  elements.modpackFiltersPanel.querySelectorAll(".filter-chip[data-filter='loader']").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const value = chip.dataset.value;
+      // Toggle: click same chip again to deselect
+      state.modpackFilters.loader = state.modpackFilters.loader === value ? "" : value;
+      renderModpackFilterUI();
+      refreshModpacks(elements.versionSearch.value);
+    });
+  });
+}
+
+// Game version select
+if (elements.modpackFilterVersion) {
+  elements.modpackFilterVersion.addEventListener("change", () => {
+    state.modpackFilters.gameVersion = elements.modpackFilterVersion.value;
+    renderModpackFilterUI();
+    refreshModpacks(elements.versionSearch.value);
+  });
+}
+
+// Close filter dropdown when clicking outside
+document.addEventListener("click", (e) => {
+  if (!elements.modpackFiltersPanel || !elements.modpackFilterBtn) return;
+  if (state.modpackFiltersOpen &&
+      !elements.modpackFiltersPanel.contains(e.target) &&
+      !elements.modpackFilterBtn.contains(e.target)) {
+    state.modpackFiltersOpen = false;
+    elements.modpackFiltersPanel.classList.add("hidden");
+    if (elements.modpackFilterBtn) {
+      elements.modpackFilterBtn.classList.toggle("active", hasActiveModpackFilters());
+    }
+  }
+});
 
 api.onEvent(handleLauncherEvent);
 refreshState();

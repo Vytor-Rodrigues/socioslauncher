@@ -19,10 +19,13 @@ const SETTINGS_SCHEMA_VERSION = 3;
 const REMOTE_GAME_VERSION_LIMIT = 36;
 
 let mainWindow;
+let logWindow = null;
+const logHistory = [];
 let busy = false;
 let activeProcess = null;
 let activeIdleGuard = null;
 let activeLaunchContext = null;
+let globalDownloadTracker = null;
 
 class InstallOnlyClient extends Client {
   startMinecraft() {
@@ -294,10 +297,11 @@ function autoDetectJavaPath(version) {
   const candidates = discoveredJavaCandidates();
   if (!candidates.length) return undefined;
 
+  const needsLegacy = isLegacyJavaNeeded(version);
   const declaredMajor = Number.parseInt(version?.javaVersion?.majorVersion, 10);
   const preferredMajor = !Number.isNaN(declaredMajor)
     ? declaredMajor
-    : isLegacyJavaNeeded(version)
+    : needsLegacy
       ? 8
       : null;
   const inspected = candidates
@@ -305,8 +309,20 @@ function autoDetectJavaPath(version) {
     .filter((candidate) => candidate.info);
 
   if (preferredMajor !== null) {
+    // Try exact match first
     const preferred = inspected.find((candidate) => candidate.info.major === preferredMajor);
     if (preferred) return preferred.path;
+  }
+
+  // For legacy versions, never fall back to Java 9+ automatically
+  if (needsLegacy) {
+    // Try any Java <= 8
+    const legacyFallback = inspected
+      .filter((c) => c.info.major <= 8)
+      .sort((a, b) => b.info.major - a.info.major)[0];
+    if (legacyFallback) return legacyFallback.path;
+    // No legacy java found — return undefined so we can warn the user
+    return undefined;
   }
 
   const bundledComponent = version.javaVersion?.component;
@@ -353,14 +369,36 @@ function isLegacyJavaNeeded(version) {
       if (!Number.isNaN(minor) && minor >= 17) return false;
     }
 
-    if (version.launchJsonPath && fs.existsSync(version.launchJsonPath)) {
-      const json = readJson(version.launchJsonPath, null);
-      if (json && typeof json.mainClass === "string") {
-        const mc = json.mainClass.toLowerCase();
-        if (mc.includes("launchwrapper") || mc.includes("fml") || mc.includes("forge")) {
-          if (minor === null || Number.isNaN(minor)) return true;
-          return minor <= 16;
+    // Try to read the version JSON from disk to inspect mainClass
+    const pathsToTry = [];
+    if (version.launchJsonPath) pathsToTry.push(version.launchJsonPath);
+    // Also try the standard versionDirectory location
+    if (version.id) {
+      pathsToTry.push(path.join(versionDirectory(version.id), `${version.id}.json`));
+    }
+    for (const jsonPath of pathsToTry) {
+      if (jsonPath && fs.existsSync(jsonPath)) {
+        const json = readJson(jsonPath, null);
+        if (json && typeof json.mainClass === "string") {
+          const mc = json.mainClass.toLowerCase();
+          if (mc.includes("launchwrapper") || mc.includes("fml") || mc.includes("forge")) {
+            if (minor === null || Number.isNaN(minor)) return true;
+            return minor <= 16;
+          }
         }
+        // If the version uses old-style minecraftArguments (pre-1.13 format), it likely needs Java 8
+        if (json && typeof json.minecraftArguments === "string" && !json.arguments) {
+          return true;
+        }
+        // If inheritsFrom points to an older version
+        if (json && json.inheritsFrom) {
+          const inheritedMatch = minecraftVersionFromText(json.inheritsFrom);
+          if (inheritedMatch && inheritedMatch.startsWith("1.")) {
+            const inheritedMinor = Number.parseInt(inheritedMatch.split(".")[1], 10);
+            if (!Number.isNaN(inheritedMinor) && inheritedMinor <= 8) return true;
+          }
+        }
+        break; // Found and read a JSON, no need to try more
       }
     }
   } catch (_e) {
@@ -381,12 +419,56 @@ function publicAccount(account = loadAccount()) {
   };
 }
 
+function accountsPath() {
+  return userDataPath("accounts.json");
+}
+
+function loadAccountsData() {
+  const data = readJson(accountsPath(), null);
+  if (data && Array.isArray(data.accounts)) return data;
+  
+  // Migrate old account.json if it exists
+  const oldData = readJson(userDataPath("account.json"), null);
+  if (oldData && oldData.profile) {
+    oldData.accountId = oldData.profile.id;
+    return {
+      activeId: oldData.profile.id,
+      accounts: [oldData]
+    };
+  }
+  
+  return { activeId: null, accounts: [] };
+}
+
+function saveAccountsData(data) {
+  writeJson(accountsPath(), data);
+}
+
 function loadAccount() {
-  return readJson(accountPath(), null);
+  const data = loadAccountsData();
+  if (!data.activeId) return null;
+  return data.accounts.find(a => a.accountId === data.activeId) || null;
+}
+
+function publicAccounts() {
+  const data = loadAccountsData();
+  return data.accounts.map(acc => ({
+    accountId: acc.accountId,
+    type: acc.type || "microsoft",
+    name: acc.profile.name,
+    id: acc.profile.id,
+    xuid: acc.xuid || null,
+    updatedAt: acc.updatedAt || null,
+    demo: Boolean(acc.profile.demo),
+    isActive: acc.accountId === data.activeId
+  }));
 }
 
 function saveMicrosoftAccount(refreshToken, minecraftSession) {
+  const data = loadAccountsData();
+  const accountId = minecraftSession.profile.id;
   const account = {
+    accountId,
     type: "microsoft",
     refreshToken,
     profile: {
@@ -397,7 +479,13 @@ function saveMicrosoftAccount(refreshToken, minecraftSession) {
     xuid: minecraftSession.xuid || null,
     updatedAt: new Date().toISOString(),
   };
-  writeJson(accountPath(), account);
+  
+  const existingIdx = data.accounts.findIndex(a => a.accountId === accountId);
+  if (existingIdx >= 0) data.accounts[existingIdx] = account;
+  else data.accounts.push(account);
+  
+  data.activeId = accountId;
+  saveAccountsData(data);
   return account;
 }
 
@@ -425,23 +513,48 @@ function normalizeOfflineUsername(username) {
 
 function saveLocalAccount(username) {
   const safeUsername = normalizeOfflineUsername(username);
+  const accountId = offlineUuid(safeUsername);
+  const data = loadAccountsData();
+  
   const account = {
+    accountId,
     type: "local",
     refreshToken: null,
     profile: {
-      id: offlineUuid(safeUsername),
+      id: accountId,
       name: safeUsername,
       demo: false,
     },
     xuid: null,
     updatedAt: new Date().toISOString(),
   };
-  writeJson(accountPath(), account);
+  
+  const existingIdx = data.accounts.findIndex(a => a.accountId === accountId);
+  if (existingIdx >= 0) data.accounts[existingIdx] = account;
+  else data.accounts.push(account);
+  
+  data.activeId = accountId;
+  saveAccountsData(data);
   return account;
 }
 
-function deleteAccount() {
-  if (fs.existsSync(accountPath())) fs.unlinkSync(accountPath());
+function deleteAccount(accountId) {
+  const data = loadAccountsData();
+  if (!accountId) accountId = data.activeId;
+  
+  data.accounts = data.accounts.filter(a => a.accountId !== accountId);
+  if (data.activeId === accountId) {
+    data.activeId = data.accounts.length > 0 ? data.accounts[0].accountId : null;
+  }
+  saveAccountsData(data);
+}
+
+function setActiveAccount(accountId) {
+  const data = loadAccountsData();
+  if (data.accounts.some(a => a.accountId === accountId)) {
+    data.activeId = accountId;
+    saveAccountsData(data);
+  }
 }
 
 function redactSecrets(input) {
@@ -455,13 +568,24 @@ function redactSecrets(input) {
 
 function sendEvent(type, message, extra = {}) {
   if (activeIdleGuard) activeIdleGuard.touch();
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send("launcher:event", {
+  
+  const eventData = {
     type,
     message: redactSecrets(message),
     at: new Date().toISOString(),
     ...extra,
-  });
+  };
+  
+  if (type !== 'progress' && type !== 'download-status' && type !== 'install-progress' && type !== 'install-start') {
+    logHistory.push({ type: eventData.type, message: eventData.message, time: Date.now() });
+    if (logHistory.length > 1000) logHistory.shift();
+    if (logWindow && !logWindow.isDestroyed()) {
+      logWindow.webContents.send("log:event", logHistory[logHistory.length - 1]);
+    }
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("launcher:event", eventData);
 }
 
 function createIdleGuard(timeoutMs, message) {
@@ -1420,20 +1544,28 @@ async function fetchJson(url, label) {
   return response.json();
 }
 
-function searchModpacksUrl(query, limit = 24) {
+function searchModpacksUrl(query, filters = {}, limit = 24) {
   const url = new URL(`${MODRINTH_API_ROOT}/search`);
   const normalizedQuery = String(query || "").trim();
   url.searchParams.set("limit", String(Math.min(50, Math.max(1, Number(limit) || 24))));
   url.searchParams.set("index", normalizedQuery ? "relevance" : "downloads");
-  url.searchParams.set("facets", JSON.stringify([["project_type:modpack"]]));
+
+  // Build facets: always filter by project_type:modpack, then optionally by loader and game_version
+  const facets = [["project_type:modpack"]];
+  const loader = String(filters.loader || "").trim().toLowerCase();
+  const gameVersion = String(filters.gameVersion || "").trim();
+  if (loader) facets.push([`categories:${loader}`]);
+  if (gameVersion) facets.push([`versions:${gameVersion}`]);
+  url.searchParams.set("facets", JSON.stringify(facets));
+
   if (normalizedQuery) {
     url.searchParams.set("query", normalizedQuery);
   }
   return url.toString();
 }
 
-async function searchModpacks(query, limit = 24) {
-  const result = await fetchJson(searchModpacksUrl(query, limit), "Modrinth search");
+async function searchModpacks(query, filters = {}, limit = 24) {
+  const result = await fetchJson(searchModpacksUrl(query, filters, limit), "Modrinth search");
   const hits = Array.isArray(result?.hits) ? result.hits : [];
 
   return {
@@ -1831,6 +1963,9 @@ async function installModpack(payload) {
   const projectLabel = payload.title || payload.projectId;
   sendEvent("install", `Buscando modpack ${projectLabel}...`);
 
+  // Reset global download tracker for this install session
+  globalDownloadTracker = { totalBytes: 0, downloadedBytes: 0, filesDone: 0, filesTotal: 0, startTime: Date.now() };
+
   try {
     const projectVersions = await modrinthProjectVersions(payload.projectId);
     const selected = selectModpackVersionById(projectVersions, payload.versionId);
@@ -1877,10 +2012,36 @@ async function installModpack(payload) {
 
     const baseJson = await prepareModpackBaseJson(versionInfo);
 
-    sendEvent("install", `Baixando arquivos do modpack ${projectLabel}...`);
-    for (const file of Array.isArray(modpackIndex.files) ? modpackIndex.files : []) {
-      if (!file?.path) continue;
-      await ensureModpackIndexedFile(file, versionDir);
+    // Compute total file count and total expected bytes for global progress
+    const indexedFiles = (Array.isArray(modpackIndex.files) ? modpackIndex.files : []).filter(f => f?.path);
+    const totalExpectedBytes = indexedFiles.reduce((sum, f) => sum + (Number(f.fileSize) || 0), 0);
+    globalDownloadTracker.filesTotal = indexedFiles.length;
+    globalDownloadTracker.totalBytes = totalExpectedBytes;
+    globalDownloadTracker.startTime = Date.now();
+
+    // Send install-start event with modpack name and file count
+    sendEvent("install-start", `Baixando ${projectLabel}`, {
+      modpackName: projectLabel,
+      filesTotal: indexedFiles.length,
+      totalBytes: totalExpectedBytes,
+    });
+
+    for (let i = 0; i < indexedFiles.length; i++) {
+      await ensureModpackIndexedFile(indexedFiles[i], versionDir);
+      globalDownloadTracker.filesDone = i + 1;
+      // After each file completes, emit global progress update
+      const globalPercent = globalDownloadTracker.filesTotal
+        ? Math.round((globalDownloadTracker.filesDone / globalDownloadTracker.filesTotal) * 100)
+        : 0;
+      sendEvent("install-progress", `Baixando ${projectLabel}: ${globalPercent}%`, {
+        silent: true,
+        modpackName: projectLabel,
+        filesDone: globalDownloadTracker.filesDone,
+        filesTotal: globalDownloadTracker.filesTotal,
+        downloadedBytes: globalDownloadTracker.downloadedBytes,
+        totalBytes: globalDownloadTracker.totalBytes,
+        startTime: globalDownloadTracker.startTime,
+      });
     }
 
     extractModpackOverrides(archive, "overrides/", versionDir);
@@ -1910,6 +2071,7 @@ async function installModpack(payload) {
     throw error;
   } finally {
     busy = false;
+    globalDownloadTracker = null;
   }
 }
 
@@ -2935,13 +3097,26 @@ async function downloadFile(url, destination, type, label) {
         await new Promise((resolve) => writer.once("drain", resolve));
       }
 
+      // Update global download tracker if active (modpack install)
+      if (globalDownloadTracker) {
+        globalDownloadTracker.downloadedBytes += chunk.length;
+      }
+
       const now = Date.now();
       if (now - lastEmit > 250 || current === total) {
         lastEmit = now;
         const percent = total ? Math.round((current / total) * 100) : 0;
         sendEvent("download-status", `${label}: ${percent}%`, {
           silent: true,
-          status: { type, current, total },
+          status: { type, current, total, label },
+          // Include global tracker data so renderer can show aggregate progress
+          global: globalDownloadTracker ? {
+            downloadedBytes: globalDownloadTracker.downloadedBytes,
+            totalBytes: globalDownloadTracker.totalBytes,
+            filesDone: globalDownloadTracker.filesDone,
+            filesTotal: globalDownloadTracker.filesTotal,
+            startTime: globalDownloadTracker.startTime,
+          } : null,
         });
       }
     }
@@ -3329,13 +3504,18 @@ async function runMinecraft(mode, input) {
         ? `Java selecionado: ${options.javaPath}`
         : "Java selecionado: java do sistema"
     );
-    if (
-      options.javaPath &&
-      !settings.javaPath &&
-      !settings.java8Path &&
-      isLegacyJavaNeeded(preparedVersion)
-    ) {
-      sendEvent("debug", "Runtime Java legacy compativel detectado automaticamente.");
+    // Warn if this version needs Java 8 but no compatible Java was found
+    if (isLegacyJavaNeeded(preparedVersion)) {
+      if (!options.javaPath) {
+        sendEvent(
+          "error",
+          "AVISO: Esta versao requer Java 8, mas nenhum Java 8 foi encontrado no sistema. " +
+          "Configure o caminho do Java 8 nas configuracoes (campo 'Java') ou instale o Java 8. " +
+          "O jogo pode falhar ao iniciar."
+        );
+      } else {
+        sendEvent("debug", "Runtime Java 8 (legacy) selecionado automaticamente.");
+      }
     }
     if (options.overrides.gameDirectory) {
       sendEvent(
@@ -3404,6 +3584,7 @@ async function getState() {
   ]);
   return {
     account: publicAccount(),
+    accounts: publicAccounts(),
     busy,
     versions,
     settings,
@@ -3418,12 +3599,13 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
-    minWidth: 980,
-    minHeight: 650,
+    resizable: true,
+    maximizable: true,
     title: "Socios Client",
+    frame: false,
     autoHideMenuBar: true,
-    backgroundColor: "#171918",
-    icon: path.join(app.getAppPath(), "logosocios.png"),
+    backgroundColor: "#09090b",
+    icon: path.join(app.getAppPath(), "taskbar-logo.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -3435,17 +3617,31 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === "win32") {
+    app.setAppUserModelId(LAUNCHER_NAME);
+  }
   ipcMain.handle("state:get", () => getState());
   ipcMain.handle("versions:refresh", () => loadVersions(true));
   ipcMain.handle("version:uninstall", (_event, payload) => uninstallVersion(payload));
-  ipcMain.handle("modpacks:search", (_event, query) => searchModpacks(query));
+  ipcMain.handle("modpacks:search", (_event, query, filters) => searchModpacks(query, filters || {}));
   ipcMain.handle("modpacks:versions", (_event, projectId) => getModpackVersions(projectId));
   ipcMain.handle("modpacks:install", (_event, payload) => installModpack(payload));
-  ipcMain.handle("account:add", () => addMicrosoftAccount());
+  ipcMain.handle("account:add", async () => {
+    try {
+      return await addMicrosoftAccount();
+    } catch (err) {
+      if (err.message === "error.gui.closed") return null;
+      throw err;
+    }
+  });
   ipcMain.handle("account:addLocal", (_event, username) => addLocalAccount(username));
-  ipcMain.handle("account:remove", () => {
-    deleteAccount();
+  ipcMain.handle("account:remove", (_event, payload) => {
+    deleteAccount(payload?.accountId);
     sendEvent("success", "Conta removida.");
+    return null;
+  });
+  ipcMain.handle("account:setActive", (_event, accountId) => {
+    setActiveAccount(accountId);
     return null;
   });
   ipcMain.handle("settings:save", (_event, settings) => saveSettings(settings));
@@ -3458,6 +3654,55 @@ app.whenReady().then(() => {
   ipcMain.handle("paths:openMinecraft", async () => {
     fs.mkdirSync(minecraftRoot(), { recursive: true });
     return shell.openPath(minecraftRoot());
+  });
+
+  ipcMain.on("window:minimize", () => {
+    if (mainWindow) mainWindow.minimize();
+  });
+  ipcMain.on("window:maximize", () => {
+    if (mainWindow) {
+      if (mainWindow.isMaximized()) mainWindow.unmaximize();
+      else mainWindow.maximize();
+    }
+  });
+  ipcMain.on("window:close", () => {
+    if (mainWindow) mainWindow.close();
+  });
+
+  ipcMain.on("log:append", (_event, { type, message }) => {
+    const logData = { type, message, time: Date.now() };
+    logHistory.push(logData);
+    if (logHistory.length > 1000) logHistory.shift();
+    if (logWindow && !logWindow.isDestroyed()) {
+      logWindow.webContents.send("log:event", logData);
+    }
+  });
+
+  ipcMain.on("window:openLog", () => {
+    if (logWindow && !logWindow.isDestroyed()) {
+      logWindow.focus();
+      return;
+    }
+    logWindow = new BrowserWindow({
+      width: 800,
+      height: 600,
+      title: "Socios Client - Log",
+      backgroundColor: "#09090b",
+      autoHideMenuBar: true,
+      icon: path.join(app.getAppPath(), "taskbar-logo.png"),
+      webPreferences: {
+        preload: path.join(__dirname, "preload.js"),
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+    logWindow.loadFile(path.join(__dirname, "renderer", "log.html"));
+    logWindow.on("closed", () => {
+      logWindow = null;
+    });
+    logWindow.webContents.on("did-finish-load", () => {
+      logWindow.webContents.send("log:init", logHistory);
+    });
   });
 
   createWindow();

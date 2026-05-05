@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Socios Client - Log</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        background: #000;
+        color: var(--text);
+      }
+      .toolbar {
+        display: flex;
+        flex-shrink: 0;
+        padding: 8px 12px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--line);
+        align-items: center;
+        gap: 8px;
+      }
+      #log-output {
+        flex: 1;
+        min-height: 0;
+        margin: 0;
+        padding: 12px;
+        overflow: auto;
+        background: #000;
+        color: #cad5c7;
+        font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-all;
+        border-radius: 0;
+        box-sizing: border-box;
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button id="clear-log" class="secondary small-button">Limpar</button>
+      <button id="auto-scroll-btn" class="auto-scroll-btn active">Auto-scroll</button>
+    </div>
+    <pre id="log-output"></pre>
+    <script src="./log.js"></script>
+  </body>
+</html>
