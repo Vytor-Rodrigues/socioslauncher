@@ -14,6 +14,7 @@ const VERSION_MANIFEST_URL =
   "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const FABRIC_META_ROOT = "https://meta.fabricmc.net/v2/versions/loader";
 const BMCL_API_ROOT = "https://bmclapi2.bangbang93.com";
+const NEOFORGE_MAVEN_ROOT = "https://maven.neoforged.net";
 const MODRINTH_API_ROOT = "https://api.modrinth.com/v2";
 const CRAFTY_SKINS_URL = "https://crafty.gg/skins";
 const AUTHLIB_INJECTOR_VERSION = "1.2.7";
@@ -32,9 +33,23 @@ const LEGACY_JAVA_RUNTIME_DOWNLOADS = {
   },
 };
 const SETTINGS_SCHEMA_VERSION = 3;
-const REMOTE_GAME_VERSION_LIMIT = 36;
+const REMOTE_GAME_VERSION_LIMIT = 120;
 const MAX_ACCOUNT_SKIN_BYTES = 2 * 1024 * 1024;
 const ACCOUNT_SKIN_PREVIEW_SIZE = 8;
+const SHARED_INSTANCE_DIRECTORIES = [
+  "saves",
+  "resourcepacks",
+  "shaderpacks",
+  "config",
+  "defaultconfigs",
+];
+const SHARED_INSTANCE_FILES = [
+  "options.txt",
+  "optionsof.txt",
+  "optionsshaders.txt",
+  "servers.dat",
+  "servers.dat_old",
+];
 const BROKEN_MODPACK_VERSION_RULES = [
   {
     projectId: "KmiWHzQ4",
@@ -190,7 +205,17 @@ function loadSettings() {
     }
   }
   if (
-    !["installed", "release", "snapshot", "fabric", "forge", "optifine", "all"].includes(
+    ![
+      "installed",
+      "release",
+      "snapshot",
+      "fabric",
+      "forge",
+      "neoforge",
+      "optifine",
+      "forgeoptifine",
+      "all",
+    ].includes(
       settings.versionFilter
     )
   ) {
@@ -217,7 +242,9 @@ function saveSettings(input) {
       "snapshot",
       "fabric",
       "forge",
+      "neoforge",
       "optifine",
+      "forgeoptifine",
       "all",
     ].includes(input.versionFilter)
       ? input.versionFilter
@@ -2318,6 +2345,17 @@ function appendTweakClassArgument(minecraftArguments, tweakClass) {
   return `${baseArguments} --tweakClass ${tweakClass}`.trim();
 }
 
+function appendStructuredTweakClassArgument(gameArguments, tweakClass) {
+  const args = Array.isArray(gameArguments) ? [...gameArguments] : [];
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] === "--tweakClass" && args[index + 1] === tweakClass) {
+      return args;
+    }
+  }
+  args.push("--tweakClass", tweakClass);
+  return args;
+}
+
 function isSelfContainedLocalVersion(versionJson, localJarPath) {
   if (!versionJson || typeof versionJson !== "object") return false;
   if (versionJson.inheritsFrom || versionJson.jar) return false;
@@ -2492,8 +2530,16 @@ function formatForgeVersionId(minecraftVersion, forgeVersion) {
   return `${minecraftVersion}-forge-${forgeVersion}`;
 }
 
+function formatNeoForgeVersionId(minecraftVersion, loaderVersion) {
+  return `${minecraftVersion}-neoforge-${loaderVersion}`;
+}
+
 function formatOptiFineVersionId(minecraftVersion, optiFineVersion) {
   return `${minecraftVersion}-OptiFine_${optiFineVersion}`;
+}
+
+function formatForgeOptiFineVersionId(minecraftVersion, forgeVersion, optiFineVersion) {
+  return `${minecraftVersion}-forge-${forgeVersion}-OptiFine_${optiFineVersion}`;
 }
 
 function denormalizeOptiFineGameVersion(version) {
@@ -2511,6 +2557,66 @@ function normalizeOptiFineLookupVersion(version) {
 function isOptiFinePreviewItem(item) {
   const patch = String(item?.patch || "").toLowerCase();
   return patch.startsWith("pre") || patch.startsWith("alpha");
+}
+
+function numericSegments(value) {
+  return (String(value || "").match(/\d+/g) || []).map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function compareNumericSegments(leftValue, rightValue) {
+  const leftParts = numericSegments(leftValue);
+  const rightParts = numericSegments(rightValue);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const left = leftParts[index] ?? 0;
+    const right = rightParts[index] ?? 0;
+    if (left !== right) return left - right;
+  }
+  return 0;
+}
+
+function neoForgeArtifactName(minecraftVersion) {
+  return minecraftVersion === "1.20.1" ? "forge" : "neoforge";
+}
+
+function neoForgeVersionInfo(rawVersion) {
+  const normalized = String(rawVersion || "").trim();
+  if (!normalized) return null;
+
+  const legacyMatch = normalized.match(/^(1\.\d+(?:\.\d+)?)-(.+)$/);
+  if (legacyMatch) {
+    return {
+      minecraftVersion: legacyMatch[1],
+      loaderVersion: legacyMatch[2],
+      rawVersion: normalized,
+      artifact: "forge",
+      stable: !/alpha|beta|pre/i.test(normalized),
+    };
+  }
+
+  const modernMatch = normalized.match(/^(\d+)\.(\d+)(?:\.|-|$)/);
+  if (!modernMatch) return null;
+
+  const major = Number.parseInt(modernMatch[1], 10);
+  const minor = Number.parseInt(modernMatch[2], 10);
+  if (Number.isNaN(major) || Number.isNaN(minor)) return null;
+
+  return {
+    minecraftVersion: minor === 0 ? `1.${major}` : `1.${major}.${minor}`,
+    loaderVersion: normalized,
+    rawVersion: normalized,
+    artifact: "neoforge",
+    stable: !/alpha|beta|pre/i.test(normalized),
+  };
+}
+
+function neoForgeInstallerUrls(versionInfo) {
+  const artifact = neoForgeArtifactName(versionInfo.minecraftVersion);
+  const rawVersion = String(versionInfo.rawVersion || "").trim();
+  const fileName = `${artifact}-${rawVersion}-installer.jar`;
+  return [
+    `${NEOFORGE_MAVEN_ROOT}/releases/net/neoforged/${artifact}/${encodeURIComponent(rawVersion)}/${encodeURIComponent(fileName)}`,
+  ];
 }
 
 function normalizeForgeLookupVersion(gameVersion) {
@@ -2712,7 +2818,7 @@ function modpackVersionInfo(version) {
 }
 
 function supportedModpackDependencyInfo(info) {
-  return Boolean(info?.minecraftVersion) && (!info.loaderType || ["fabric", "forge"].includes(info.loaderType));
+  return Boolean(info?.minecraftVersion) && (!info.loaderType || ["fabric", "forge", "neoforge"].includes(info.loaderType));
 }
 
 function normalizeModpackVersionNumber(value) {
@@ -2803,8 +2909,8 @@ function supportedModpackError(info) {
     return "O modpack nao informa a versao base do Minecraft.";
   }
 
-  if (info.loaderType && !["fabric", "forge"].includes(info.loaderType)) {
-    return `Este launcher instala modpacks vanilla, Fabric e Forge. Loader nao suportado: ${info.loaderType}.`;
+  if (info.loaderType && !["fabric", "forge", "neoforge"].includes(info.loaderType)) {
+    return `Este launcher instala modpacks vanilla, Fabric, Forge e NeoForge. Loader nao suportado: ${info.loaderType}.`;
   }
 
   return "Nenhuma versao compativel do modpack foi encontrada.";
@@ -3023,6 +3129,29 @@ function remoteForgeVersion(versionInfo) {
   };
 }
 
+function remoteNeoForgeVersion(versionInfo) {
+  const id = formatNeoForgeVersionId(versionInfo.minecraftVersion, versionInfo.loaderVersion);
+  const urls = neoForgeInstallerUrls(versionInfo);
+  return {
+    id,
+    type: "neoforge",
+    url: null,
+    time: new Date().toISOString(),
+    releaseTime: new Date().toISOString(),
+    complianceLevel: null,
+    installed: isVersionInstalled(id),
+    local: false,
+    inheritsFrom: versionInfo.minecraftVersion,
+    remoteLoader: true,
+    loaderType: "neoforge",
+    loaderVersion: versionInfo.loaderVersion,
+    rawVersion: versionInfo.rawVersion,
+    minecraftVersion: versionInfo.minecraftVersion,
+    installerUrl: urls[0],
+    installerUrls: urls,
+  };
+}
+
 async function prepareModpackBaseJson(versionInfo) {
   if (versionInfo.loaderType === "fabric") {
     const installedId = await installRemoteFabricVersion(remoteFabricVersion(versionInfo));
@@ -3038,6 +3167,15 @@ async function prepareModpackBaseJson(versionInfo) {
     const versionJson = readJson(getLocalVersionJsonPath(installedId), null);
     if (!versionJson) {
       throw new Error(`Nao foi possivel preparar o loader Forge para ${versionInfo.minecraftVersion}.`);
+    }
+    return normalizeVersionShape(cloneJson(versionJson));
+  }
+
+  if (versionInfo.loaderType === "neoforge") {
+    const installedId = await installRemoteNeoForgeVersion(remoteNeoForgeVersion(versionInfo));
+    const versionJson = readJson(getLocalVersionJsonPath(installedId), null);
+    if (!versionJson) {
+      throw new Error(`Nao foi possivel preparar o loader NeoForge para ${versionInfo.minecraftVersion}.`);
     }
     return normalizeVersionShape(cloneJson(versionJson));
   }
@@ -3239,7 +3377,7 @@ async function mapWithConcurrency(items, limit, iteratee) {
 
 function remoteCatalogCandidates(manifest) {
   const officialVersions = (manifest?.versions || [])
-    .filter((version) => version.url && ["release", "snapshot"].includes(version.type))
+    .filter((version) => version.url && version.type === "release")
     .sort(
       (left, right) =>
         new Date(right.releaseTime || right.time || 0) - new Date(left.releaseTime || left.time || 0)
@@ -3313,40 +3451,42 @@ async function loadForgeCatalog(manifest, force = false) {
       );
       if (!Array.isArray(list) || !list.length) return null;
 
-      const latest = [...list]
+      return [...list]
         .filter((item) =>
           Array.isArray(item?.files) &&
           item.files.some((file) => file?.category === "installer" && file?.format === "jar")
         )
         .sort((left, right) => {
-        if ((right.build || 0) !== (left.build || 0)) {
-          return (right.build || 0) - (left.build || 0);
-        }
-        return new Date(right.modified || 0) - new Date(left.modified || 0);
-        })[0];
-
-      if (!latest?.version) return null;
-      const id = formatForgeVersionId(minecraftVersion, latest.version);
-      return {
-        id,
-        type: "forge",
-        url: null,
-        time: latest.modified || new Date().toISOString(),
-        releaseTime: latest.modified || new Date().toISOString(),
-        complianceLevel: null,
-        installed: isVersionInstalled(id),
-        local: false,
-        inheritsFrom: minecraftVersion,
-        remoteLoader: true,
-        loaderType: "forge",
-        loaderVersion: latest.version,
-        minecraftVersion,
-        installerUrl: forgeInstallerUrls(minecraftVersion, latest.version, latest.branch || "")[0],
-        installerUrls: forgeInstallerUrls(minecraftVersion, latest.version, latest.branch || ""),
-      };
+          if ((right.build || 0) !== (left.build || 0)) {
+            return (right.build || 0) - (left.build || 0);
+          }
+          return new Date(right.modified || 0) - new Date(left.modified || 0);
+        })
+        .map((item) => {
+          if (!item?.version) return null;
+          const id = formatForgeVersionId(minecraftVersion, item.version);
+          return {
+            id,
+            type: "forge",
+            url: null,
+            time: item.modified || new Date().toISOString(),
+            releaseTime: item.modified || new Date().toISOString(),
+            complianceLevel: null,
+            installed: isVersionInstalled(id),
+            local: false,
+            inheritsFrom: minecraftVersion,
+            remoteLoader: true,
+            loaderType: "forge",
+            loaderVersion: item.version,
+            minecraftVersion,
+            installerUrl: forgeInstallerUrls(minecraftVersion, item.version, item.branch || "")[0],
+            installerUrls: forgeInstallerUrls(minecraftVersion, item.version, item.branch || ""),
+          };
+        })
+        .filter(Boolean);
     });
 
-    return { versions };
+    return { versions: versions.flat() };
   });
 }
 
@@ -3355,19 +3495,15 @@ async function loadOptiFineCatalog(_manifest, force = false) {
     const list = await fetchJson(`${BMCL_API_ROOT}/optifine/versionlist`, "OptiFine");
     if (!Array.isArray(list)) return { versions: [] };
 
-    const byGameVersion = new Map();
-    for (const item of list) {
-      if (!item?.mcversion || !item?.type || !item?.patch) continue;
-      const lookupVersion = String(item.mcversion);
-      const minecraftVersion = denormalizeOptiFineGameVersion(lookupVersion);
-      const preview = isOptiFinePreviewItem(item);
-      const current = byGameVersion.get(minecraftVersion);
-      if (current && !current.preview) continue;
-      if (current && current.preview && preview) continue;
-
-      const optiFineVersion = `${item.type}_${item.patch}`;
-      const id = formatOptiFineVersionId(minecraftVersion, optiFineVersion);
-      byGameVersion.set(minecraftVersion, {
+    const versions = list
+      .map((item) => {
+        if (!item?.mcversion || !item?.type || !item?.patch) return null;
+        const lookupVersion = String(item.mcversion);
+        const minecraftVersion = denormalizeOptiFineGameVersion(lookupVersion);
+        const preview = isOptiFinePreviewItem(item);
+        const optiFineVersion = `${item.type}_${item.patch}`;
+        const id = formatOptiFineVersionId(minecraftVersion, optiFineVersion);
+        return {
         id,
         type: "optifine",
         url: null,
@@ -3385,29 +3521,143 @@ async function loadOptiFineCatalog(_manifest, force = false) {
         installerUrl: `${BMCL_API_ROOT}/optifine/${encodeURIComponent(
           normalizeOptiFineLookupVersion(minecraftVersion)
         )}/${encodeURIComponent(item.type)}/${encodeURIComponent(item.patch)}`,
-      });
-    }
-
-    return {
-      versions: Array.from(byGameVersion.values()).map((version) => {
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => {
+        const mcCompare = compareNumericSegments(right.minecraftVersion, left.minecraftVersion);
+        if (mcCompare !== 0) return mcCompare;
+        if (left.preview !== right.preview) return left.preview ? 1 : -1;
+        return compareNumericSegments(right.loaderVersion, left.loaderVersion);
+      })
+      .map((version) => {
         const { preview, ...rest } = version;
         return rest;
-      }),
+      });
+
+    return { versions };
+  });
+}
+
+async function loadNeoForgeCatalog(manifest, force = false) {
+  return loadCachedRemoteCatalog("neoforge", force, async () => {
+    const candidates = new Set(remoteCatalogCandidates(manifest));
+    const releaseTimeById = new Map(
+      (manifest?.versions || []).map((version) => [version.id, version.releaseTime || version.time])
+    );
+
+    const [modernResponse, legacyResponse] = await Promise.all([
+      fetchJson(
+        `${NEOFORGE_MAVEN_ROOT}/api/maven/versions/releases/net/neoforged/neoforge`,
+        "NeoForge versions"
+      ).catch(() => ({ versions: [] })),
+      fetchJson(
+        `${NEOFORGE_MAVEN_ROOT}/api/maven/versions/releases/net/neoforged/forge`,
+        "NeoForge legacy forge versions"
+      ).catch(() => ({ versions: [] })),
+    ]);
+
+    return {
+      versions: [
+        ...(Array.isArray(modernResponse?.versions) ? modernResponse.versions : []),
+        ...(Array.isArray(legacyResponse?.versions) ? legacyResponse.versions : []),
+      ]
+        .map(neoForgeVersionInfo)
+        .filter((versionInfo) => versionInfo && candidates.has(versionInfo.minecraftVersion))
+        .sort((left, right) => {
+          const mcCompare = compareNumericSegments(right.minecraftVersion, left.minecraftVersion);
+          if (mcCompare !== 0) return mcCompare;
+          return compareNumericSegments(right.rawVersion, left.rawVersion);
+        })
+        .map((versionInfo) => ({
+          ...remoteNeoForgeVersion(versionInfo),
+          time: releaseTimeById.get(versionInfo.minecraftVersion) || new Date().toISOString(),
+          releaseTime: releaseTimeById.get(versionInfo.minecraftVersion) || new Date().toISOString(),
+          stable: versionInfo.stable,
+        })),
     };
   });
+}
+
+function buildForgeOptiFineCatalog(forgeVersions, optiFineVersions) {
+  const optiFineByMinecraft = new Map();
+  for (const version of Array.isArray(optiFineVersions) ? optiFineVersions : []) {
+    const current = optiFineByMinecraft.get(version.minecraftVersion);
+    if (!current) {
+      optiFineByMinecraft.set(version.minecraftVersion, version);
+      continue;
+    }
+    const currentIsPreview = /pre|alpha/i.test(String(current.loaderVersion || ""));
+    const nextIsPreview = /pre|alpha/i.test(String(version.loaderVersion || ""));
+    if (currentIsPreview && !nextIsPreview) {
+      optiFineByMinecraft.set(version.minecraftVersion, version);
+      continue;
+    }
+    if (currentIsPreview === nextIsPreview) {
+      const compare = compareNumericSegments(version.loaderVersion, current.loaderVersion);
+      if (compare > 0) {
+        optiFineByMinecraft.set(version.minecraftVersion, version);
+      }
+    }
+  }
+
+  return (Array.isArray(forgeVersions) ? forgeVersions : [])
+    .map((forgeVersion) => {
+      const optiFineVersion = optiFineByMinecraft.get(forgeVersion.minecraftVersion);
+      if (!optiFineVersion) return null;
+
+      return {
+        id: formatForgeOptiFineVersionId(
+          forgeVersion.minecraftVersion,
+          forgeVersion.loaderVersion,
+          optiFineVersion.loaderVersion
+        ),
+        type: "forgeoptifine",
+        url: null,
+        time: forgeVersion.time || optiFineVersion.time || new Date().toISOString(),
+        releaseTime:
+          forgeVersion.releaseTime || optiFineVersion.releaseTime || new Date().toISOString(),
+        complianceLevel: null,
+        installed: false,
+        local: false,
+        inheritsFrom: forgeVersion.minecraftVersion,
+        remoteLoader: true,
+        loaderType: "forgeoptifine",
+        loaderVersion: `${forgeVersion.loaderVersion} + ${optiFineVersion.loaderVersion}`,
+        forgeVersion: forgeVersion.loaderVersion,
+        optiFineVersion: optiFineVersion.loaderVersion,
+        minecraftVersion: forgeVersion.minecraftVersion,
+        forgeInstallerUrl: forgeVersion.installerUrl,
+        forgeInstallerUrls: forgeVersion.installerUrls,
+        optiFineInstallerUrl: optiFineVersion.installerUrl,
+      };
+    })
+    .filter(Boolean)
+    .map((version) => ({
+      ...version,
+      installed: isVersionInstalled(version.id),
+    }));
 }
 
 async function loadRemoteLoaderCatalogs(manifest, force = false) {
   const results = await Promise.allSettled([
     loadFabricCatalog(manifest, force),
     loadForgeCatalog(manifest, force),
+    loadNeoForgeCatalog(manifest, force),
     loadOptiFineCatalog(manifest, force),
   ]);
 
-  return results.flatMap((result) => {
-    if (result.status !== "fulfilled") return [];
-    return result.value?.versions || [];
-  });
+  const [fabricCatalog, forgeCatalog, neoForgeCatalog, optiFineCatalog] = results.map((result) =>
+    result.status === "fulfilled" ? result.value?.versions || [] : []
+  );
+
+  return [
+    ...fabricCatalog,
+    ...forgeCatalog,
+    ...neoForgeCatalog,
+    ...optiFineCatalog,
+    ...buildForgeOptiFineCatalog(forgeCatalog, optiFineCatalog),
+  ];
 }
 
 async function ensureBaseVersionReady(versionId) {
@@ -3438,13 +3688,46 @@ function findInstalledForgeVersionId(minecraftVersion, forgeVersion) {
   return null;
 }
 
-function patchLocalVersionType(id, type) {
+function patchLocalVersionMetadata(id, patch) {
   const versionJsonPath = getLocalVersionJsonPath(id);
   const versionJson = readJson(versionJsonPath, null);
   if (!versionJson) return;
-  if (versionJson.type === type) return;
-  versionJson.type = type;
+
+  let changed = false;
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (value === undefined || versionJson[key] === value) continue;
+    versionJson[key] = value;
+    changed = true;
+  }
+
+  if (!changed) return;
   writeJson(versionJsonPath, versionJson);
+}
+
+function findInstalledNeoForgeVersionId(minecraftVersion, rawVersion) {
+  const artifact = neoForgeArtifactName(minecraftVersion);
+
+  for (const entry of safeReadDirectory(path.join(minecraftRoot(), "versions"))) {
+    if (!entry.isDirectory()) continue;
+    const id = entry.name;
+    const versionJson = readJson(getLocalVersionJsonPath(id), null);
+    if (!versionJson) continue;
+
+    const libraries = Array.isArray(versionJson.libraries) ? versionJson.libraries : [];
+    const hasNeoForgeLibrary = libraries.some((library) =>
+      libraryNameContains(library, `net.neoforged:${artifact}:${rawVersion}`)
+    );
+    if (hasNeoForgeLibrary) return id;
+
+    if (
+      String(versionJson.id || "").toLowerCase().includes("neoforge") &&
+      String(versionJson.id || "").includes(String(rawVersion || ""))
+    ) {
+      return id;
+    }
+  }
+
+  return null;
 }
 
 function runJavaProcess(javaPath, args, cwd, label) {
@@ -3632,7 +3915,12 @@ async function installRemoteFabricVersion(version) {
   await ensureBaseVersionReady(version.minecraftVersion);
   const versionJsonPath = getLocalVersionJsonPath(version.id);
   if (fs.existsSync(versionJsonPath)) {
-    patchLocalVersionType(version.id, "fabric");
+    patchLocalVersionMetadata(version.id, {
+      type: "fabric",
+      loaderType: "fabric",
+      loaderVersion: version.loaderVersion,
+      minecraftVersion: version.minecraftVersion,
+    });
     return version.id;
   }
 
@@ -3654,7 +3942,12 @@ async function installRemoteForgeVersion(version) {
   const { meta, versionJson } = await ensureBaseVersionReady(version.minecraftVersion);
   const expectedId = version.id;
   if (fs.existsSync(getLocalVersionJsonPath(expectedId))) {
-    patchLocalVersionType(expectedId, "forge");
+    patchLocalVersionMetadata(expectedId, {
+      type: "forge",
+      loaderType: "forge",
+      loaderVersion: version.loaderVersion,
+      minecraftVersion: version.minecraftVersion,
+    });
     return expectedId;
   }
 
@@ -3702,7 +3995,78 @@ async function installRemoteForgeVersion(version) {
   }
 
   const installedId = findInstalledForgeVersionId(version.minecraftVersion, version.loaderVersion) || expectedId;
-  patchLocalVersionType(installedId, "forge");
+  patchLocalVersionMetadata(installedId, {
+    type: "forge",
+    loaderType: "forge",
+    loaderVersion: version.loaderVersion,
+    minecraftVersion: version.minecraftVersion,
+  });
+  return installedId;
+}
+
+async function installRemoteNeoForgeVersion(version) {
+  const { meta, versionJson } = await ensureBaseVersionReady(version.minecraftVersion);
+  const expectedId = version.id;
+  if (fs.existsSync(getLocalVersionJsonPath(expectedId))) {
+    patchLocalVersionMetadata(expectedId, {
+      type: "neoforge",
+      loaderType: "neoforge",
+      loaderVersion: version.loaderVersion,
+      rawVersion: version.rawVersion,
+      minecraftVersion: version.minecraftVersion,
+    });
+    return expectedId;
+  }
+
+  sendEvent(
+    "install",
+    `Instalando NeoForge ${version.loaderVersion} para ${version.minecraftVersion}...`
+  );
+  const installerPath = installerCachePath(
+    "neoforge",
+    sanitizeFileName(expectedId),
+    `${neoForgeArtifactName(version.minecraftVersion)}-${sanitizeFileName(version.rawVersion || version.loaderVersion)}-installer.jar`
+  );
+  if (!fs.existsSync(installerPath)) {
+    await downloadFileWithCandidates(
+      version.installerUrls || [version.installerUrl],
+      installerPath,
+      "client-package",
+      "Instalador NeoForge"
+    );
+  }
+
+  const javaPath = await resolveJavaPathForVersion(
+    { ...meta, javaVersion: versionJson.javaVersion },
+    loadSettings()
+  );
+
+  try {
+    runJavaProcess(
+      javaPath,
+      ["-jar", installerPath, "--installClient", minecraftRoot()],
+      minecraftRoot(),
+      "Instalador NeoForge"
+    );
+  } catch (_error) {
+    runJavaProcess(
+      javaPath,
+      ["-jar", installerPath, "--installClient"],
+      minecraftRoot(),
+      "Instalador NeoForge"
+    );
+  }
+
+  const installedId =
+    findInstalledNeoForgeVersionId(version.minecraftVersion, version.rawVersion || version.loaderVersion) ||
+    expectedId;
+  patchLocalVersionMetadata(installedId, {
+    type: "neoforge",
+    loaderType: "neoforge",
+    loaderVersion: version.loaderVersion,
+    rawVersion: version.rawVersion,
+    minecraftVersion: version.minecraftVersion,
+  });
   return installedId;
 }
 
@@ -3740,7 +4104,12 @@ async function installRemoteOptiFineVersion(version) {
   const repairRequired = needsOptiFineRepair(version, existingVersionJson);
 
   if (existingVersionJson && !repairRequired) {
-    patchLocalVersionType(version.id, "optifine");
+    patchLocalVersionMetadata(version.id, {
+      type: "optifine",
+      loaderType: "optifine",
+      loaderVersion: version.loaderVersion,
+      minecraftVersion: version.minecraftVersion,
+    });
     return version.id;
   }
 
@@ -3799,7 +4168,102 @@ async function installRemoteOptiFineVersion(version) {
     throw new Error(`OptiFine ${version.id} nao foi preparado corretamente em segundo plano.`);
   }
 
-  patchLocalVersionType(version.id, "optifine");
+  patchLocalVersionMetadata(version.id, {
+    type: "optifine",
+    loaderType: "optifine",
+    loaderVersion: version.loaderVersion,
+    minecraftVersion: version.minecraftVersion,
+  });
+  return version.id;
+}
+
+async function installRemoteForgeOptiFineVersion(version) {
+  const forgeVersion = remoteForgeVersion({
+    minecraftVersion: version.minecraftVersion,
+    loaderVersion: version.forgeVersion,
+  });
+  const installedForgeId = await installRemoteForgeVersion(forgeVersion);
+  const forgeLocalJson = readJson(getLocalVersionJsonPath(installedForgeId), null);
+  if (!forgeLocalJson) {
+    throw new Error(`Nao foi possivel localizar o Forge instalado para ${version.minecraftVersion}.`);
+  }
+
+  const forgeLocalJar = findLocalVersionJar(installedForgeId);
+  let combinedLaunchJson = normalizeVersionShape(cloneJson(forgeLocalJson));
+  if (!isSelfContainedLocalVersion(combinedLaunchJson, forgeLocalJar)) {
+    const explicitBaseId = forgeLocalJson.inheritsFrom || forgeLocalJson.jar || version.minecraftVersion;
+    const baseMeta = await resolveOfficialVersionMeta(explicitBaseId);
+    const baseJson = await ensureVersionJson(baseMeta);
+    combinedLaunchJson = mergeInheritedVersion(baseJson, combinedLaunchJson);
+  }
+
+  const javaPath = await resolveJavaPathForVersion(
+    { ...forgeVersion, javaVersion: combinedLaunchJson.javaVersion || null },
+    loadSettings()
+  );
+  const installerPath = installerCachePath(
+    "optifine",
+    sanitizeFileName(version.id),
+    `OptiFine-${sanitizeFileName(version.id)}-installer.jar`
+  );
+  if (!fs.existsSync(installerPath)) {
+    await downloadFile(
+      version.optiFineInstallerUrl,
+      installerPath,
+      "client-package",
+      "Instalador OptiFine"
+    );
+  }
+
+  const optiLibraries = installOptiFineArtifacts(
+    {
+      minecraftVersion: version.minecraftVersion,
+      loaderVersion: version.optiFineVersion,
+    },
+    installerPath,
+    javaPath
+  );
+  const optiFineTweaker = "optifine.OptiFineTweaker";
+
+  combinedLaunchJson = {
+    ...combinedLaunchJson,
+    id: version.id,
+    type: "forgeoptifine",
+    time: new Date().toISOString(),
+    releaseTime: new Date().toISOString(),
+    minecraftVersion: version.minecraftVersion,
+    loaderType: "forgeoptifine",
+    loaderVersion: `${version.forgeVersion} + ${version.optiFineVersion}`,
+    forgeVersion: version.forgeVersion,
+    optiFineVersion: version.optiFineVersion,
+    libraries: uniqueLibraries([
+      ...optiLibraries.map((library) => normalizeVersionShape({ ...library })),
+      ...(Array.isArray(combinedLaunchJson.libraries) ? combinedLaunchJson.libraries : []),
+    ]),
+    arguments: {
+      ...(combinedLaunchJson.arguments || {}),
+      game: appendStructuredTweakClassArgument(
+        combinedLaunchJson.arguments?.game,
+        optiFineTweaker
+      ),
+    },
+    minecraftArguments: hasLegacyGameArguments(combinedLaunchJson)
+      ? appendTweakClassArgument(combinedLaunchJson.minecraftArguments, optiFineTweaker)
+      : combinedLaunchJson.minecraftArguments,
+  };
+  delete combinedLaunchJson.inheritsFrom;
+  delete combinedLaunchJson.jar;
+
+  fs.mkdirSync(versionDirectory(version.id), { recursive: true });
+  writeJson(getLocalVersionJsonPath(version.id), combinedLaunchJson);
+  patchLocalVersionMetadata(version.id, {
+    type: "forgeoptifine",
+    loaderType: "forgeoptifine",
+    loaderVersion: `${version.forgeVersion} + ${version.optiFineVersion}`,
+    forgeVersion: version.forgeVersion,
+    optiFineVersion: version.optiFineVersion,
+    minecraftVersion: version.minecraftVersion,
+  });
   return version.id;
 }
 
@@ -3810,8 +4274,14 @@ async function installRemoteLoaderVersion(version) {
   if (version.loaderType === "forge") {
     return installRemoteForgeVersion(version);
   }
+  if (version.loaderType === "neoforge") {
+    return installRemoteNeoForgeVersion(version);
+  }
   if (version.loaderType === "optifine") {
     return installRemoteOptiFineVersion(version);
+  }
+  if (version.loaderType === "forgeoptifine") {
+    return installRemoteForgeOptiFineVersion(version);
   }
   throw new Error(`Loader remoto nao suportado: ${version.loaderType}`);
 }
@@ -4010,7 +4480,61 @@ function directoryHasEntries(directory) {
   return safeReadDirectory(directory).length > 0;
 }
 
-function versionGameDirectory(id) {
+function copyMissingInstanceContent(sourcePath, targetPath) {
+  if (!fs.existsSync(sourcePath)) return 0;
+
+  const stats = fs.lstatSync(sourcePath);
+  if (stats.isSymbolicLink()) return 0;
+
+  if (stats.isDirectory()) {
+    fs.mkdirSync(targetPath, { recursive: true });
+    let copied = 0;
+    for (const entry of safeReadDirectory(sourcePath)) {
+      copied += copyMissingInstanceContent(
+        path.join(sourcePath, entry.name),
+        path.join(targetPath, entry.name)
+      );
+    }
+    return copied;
+  }
+
+  if (fs.existsSync(targetPath)) return 0;
+  ensureParent(targetPath);
+  fs.copyFileSync(sourcePath, targetPath);
+  return 1;
+}
+
+function inferVersionLoaderType(version = null, versionJson = null) {
+  const explicitLoader = String(
+    version?.loaderType || versionJson?.loaderType || ""
+  )
+    .trim()
+    .toLowerCase();
+  if (explicitLoader) return explicitLoader;
+
+  const candidates = [
+    version?.id,
+    version?.inheritsFrom,
+    versionJson?.id,
+    versionJson?.inheritsFrom,
+  ]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase());
+
+  if (candidates.some((value) => value.includes("neoforge"))) return "neoforge";
+  if (candidates.some((value) => value.includes("fabric"))) return "fabric";
+  if (candidates.some((value) => value.includes("forgeoptifine"))) return "forgeoptifine";
+  if (candidates.some((value) => value.includes("forge"))) return "forge";
+  if (candidates.some((value) => value.includes("quilt"))) return "quilt";
+
+  return null;
+}
+
+function isForgeOrFabricVersion(version = null, versionJson = null) {
+  return ["forge", "fabric"].includes(inferVersionLoaderType(version, versionJson));
+}
+
+function versionGameDirectory(id, version = null, versionJson = null) {
   const directory = versionDirectory(id);
 
   try {
@@ -4026,10 +4550,110 @@ function versionGameDirectory(id) {
       directoryHasEntries(path.join(directory, "resourcepacks")) ||
       directoryHasEntries(path.join(directory, "shaderpacks"));
 
-    return hasInstanceFiles ? directory : null;
+    if (!hasInstanceFiles) return null;
+
+    const rootModsDirectory = path.join(minecraftRoot(), "mods");
+    const versionModsDirectory = path.join(directory, "mods");
+    const shouldFallbackRootMods =
+      isForgeOrFabricVersion(version, versionJson) &&
+      !directoryHasFiles(versionModsDirectory) &&
+      directoryHasFiles(rootModsDirectory);
+
+    return {
+      path: directory,
+      useRootModsFallback: shouldFallbackRootMods,
+      rootModsDirectory,
+      versionModsDirectory,
+    };
   } catch (_error) {
     return null;
   }
+}
+
+function prepareModsFallback(gameDirectoryInfo, context) {
+  if (!gameDirectoryInfo?.path) return null;
+
+  const instanceDirectory = gameDirectoryInfo.path;
+
+  try {
+    let copiedItems = 0;
+
+    for (const directoryName of SHARED_INSTANCE_DIRECTORIES) {
+      copiedItems += copyMissingInstanceContent(
+        path.join(minecraftRoot(), directoryName),
+        path.join(instanceDirectory, directoryName)
+      );
+    }
+
+    for (const fileName of SHARED_INSTANCE_FILES) {
+      copiedItems += copyMissingInstanceContent(
+        path.join(minecraftRoot(), fileName),
+        path.join(instanceDirectory, fileName)
+      );
+    }
+
+    if (copiedItems > 0) {
+      sendEvent(
+        "debug",
+        `Dados compartilhados da .minecraft mesclados na instancia (${copiedItems} item(ns)).`
+      );
+    }
+  } catch (error) {
+    sendEvent(
+      "warning",
+      `Nao foi possivel mesclar saves/configuracoes da .minecraft: ${error.message || String(error)}`
+    );
+  }
+
+  if (!gameDirectoryInfo.useRootModsFallback) return instanceDirectory;
+
+  const targetModsDirectory = gameDirectoryInfo.versionModsDirectory;
+  const sourceModsDirectory = gameDirectoryInfo.rootModsDirectory;
+
+  try {
+    fs.mkdirSync(path.dirname(targetModsDirectory), { recursive: true });
+
+    if (fs.existsSync(targetModsDirectory)) {
+      const stats = fs.lstatSync(targetModsDirectory);
+      if (stats.isSymbolicLink()) {
+        try {
+          const resolved = fs.readlinkSync(targetModsDirectory);
+          if (path.resolve(path.dirname(targetModsDirectory), resolved) === path.resolve(sourceModsDirectory)) {
+            return gameDirectoryInfo.path;
+          }
+        } catch (_error) {
+          // Recreate broken symlink below.
+        }
+        fs.rmSync(targetModsDirectory, { recursive: true, force: true });
+      } else if (!stats.isDirectory()) {
+        fs.rmSync(targetModsDirectory, { recursive: true, force: true });
+      }
+    }
+
+    if (!fs.existsSync(targetModsDirectory)) {
+      fs.symlinkSync(sourceModsDirectory, targetModsDirectory, "junction");
+      addLaunchContextCleanup(context, () => {
+        try {
+          if (fs.existsSync(targetModsDirectory) && fs.lstatSync(targetModsDirectory).isSymbolicLink()) {
+            fs.rmSync(targetModsDirectory, { recursive: true, force: true });
+          }
+        } catch (_error) {
+          // Cleanup should stay best-effort.
+        }
+      });
+      sendEvent(
+        "debug",
+        `Mods da instancia vazios; usando fallback de ${sourceModsDirectory}.`
+      );
+    }
+  } catch (error) {
+    sendEvent(
+      "warning",
+      `Nao foi possivel aplicar fallback de mods da .minecraft: ${error.message || String(error)}`
+    );
+  }
+
+  return instanceDirectory;
 }
 
 function loadLocalVersions() {
@@ -4322,7 +4946,7 @@ async function ensureClientJar(version, versionJson) {
 async function ensureVersionFiles(version) {
   const localJson = readJson(getLocalVersionJsonPath(version.id), null);
   const localJarPath = findLocalVersionJar(version.id);
-  const gameDirectory = versionGameDirectory(version.id);
+  const gameDirectory = versionGameDirectory(version.id, version, localJson);
 
   if (version.remoteLoader) {
     const installedId = await installRemoteLoaderVersion(version);
@@ -4636,6 +5260,7 @@ async function runMinecraft(mode, input) {
       cleanupTasks: [],
     };
     activeLaunchContext = launchContext;
+    preparedVersion.gameDirectory = prepareModsFallback(preparedVersion.gameDirectory, launchContext);
     wireLauncher(client);
     const localSkinRuntime =
       mode === "launch"

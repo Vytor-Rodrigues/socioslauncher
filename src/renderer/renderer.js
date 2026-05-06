@@ -323,6 +323,8 @@ function modpackLoaderLabel(loaderType) {
   if (normalized === "vanilla") return "Vanilla";
   if (normalized === "fabric") return "Fabric";
   if (normalized === "forge") return "Forge";
+  if (normalized === "neoforge") return "NeoForge";
+  if (normalized === "forgeoptifine") return "Forge + OptiFine";
   return normalized;
 }
 
@@ -972,7 +974,9 @@ function versionLabel(version) {
     snapshot: "snapshot",
     fabric: "fabric",
     forge: "forge",
+    neoforge: "neoforge",
     optifine: "optifine",
+    forgeoptifine: "forge+optifine",
     modpack: "modpack",
     custom: "custom",
     local: "local",
@@ -1007,8 +1011,8 @@ function versionDescription(version) {
   if (version.loaderType && version.loaderType !== "vanilla") {
     parts.push(
       version.loaderVersion
-        ? `${version.loaderType} ${version.loaderVersion}`
-        : version.loaderType
+        ? `${modpackLoaderLabel(version.loaderType)} ${version.loaderVersion}`
+        : modpackLoaderLabel(version.loaderType)
     );
   }
   if (version.loaderVersion && (!version.loaderType || version.loaderType === "vanilla")) {
@@ -1036,6 +1040,16 @@ function versionSortSource(version) {
   return String(version.minecraftVersion || version.id || "");
 }
 
+function versionLoaderSortSource(version) {
+  return String(
+    version.rawVersion ||
+      version.forgeVersion ||
+      version.loaderVersion ||
+      version.id ||
+      ""
+  );
+}
+
 function parseNumericVersionParts(value) {
   const match = String(value || "").match(/\d+(?:\.\d+)+|\d+/);
   if (!match) return null;
@@ -1060,18 +1074,34 @@ function compareVersions(left, right) {
 
   if (leftParts && rightParts) {
     const numericComparison = compareVersionParts(leftParts, rightParts);
-    if (numericComparison !== 0) return numericComparison;
+    if (numericComparison !== 0) return -numericComparison;
   } else if (leftParts || rightParts) {
-    return leftParts ? -1 : 1;
+    return leftParts ? 1 : -1;
   }
+
+  const leftLoaderSource = versionLoaderSortSource(left);
+  const rightLoaderSource = versionLoaderSortSource(right);
+  const leftLoaderParts = parseNumericVersionParts(leftLoaderSource);
+  const rightLoaderParts = parseNumericVersionParts(rightLoaderSource);
+
+  if (leftLoaderParts && rightLoaderParts) {
+    const loaderComparison = compareVersionParts(leftLoaderParts, rightLoaderParts);
+    if (loaderComparison !== 0) return -loaderComparison;
+  } else if (leftLoaderParts || rightLoaderParts) {
+    return leftLoaderParts ? 1 : -1;
+  }
+
+  const releaseTimeComparison =
+    new Date(right.releaseTime || right.time || 0) - new Date(left.releaseTime || left.time || 0);
+  if (releaseTimeComparison !== 0) return releaseTimeComparison;
 
   const idComparison = leftSource.localeCompare(rightSource, undefined, {
     numeric: true,
     sensitivity: "base",
   });
-  if (idComparison !== 0) return idComparison;
+  if (idComparison !== 0) return -idComparison;
 
-  return String(left.id || "").localeCompare(String(right.id || ""), undefined, {
+  return -String(left.id || "").localeCompare(String(right.id || ""), undefined, {
     numeric: true,
     sensitivity: "base",
   });
@@ -1094,7 +1124,7 @@ function filteredVersions() {
         String(version.modpackTitle || "").toLowerCase().includes(query)
     )
     .sort(compareVersions)
-    .slice(0, 260);
+    .slice(0, 1200);
 }
 
 function renderVersions() {
