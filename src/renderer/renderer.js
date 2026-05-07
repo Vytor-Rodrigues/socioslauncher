@@ -802,6 +802,13 @@ function renderAccountSkinPanel() {
   if (account.skin?.updatedAt) {
     details.push(`Atualizada em ${formatDate(account.skin.updatedAt)}`);
   }
+  if (account.skin?.sessionVerifiedAt) {
+    details.push("Confirmada no online-mode");
+  } else if (account.skin?.verifiedAt) {
+    details.push("Confirmada na Minecraft Services");
+  } else if (account.skin?.localOnly) {
+    details.push("Local");
+  }
   if (state.skinCatalogError) {
     details.push(state.skinCatalogError);
   }
@@ -810,7 +817,7 @@ function renderAccountSkinPanel() {
     details.join(" • ") || "Use um PNG proprio ou escolha uma skin pronta da Crafty.";
   elements.accountSkinHint.textContent =
     account.type === "microsoft"
-      ? "Arquivos PNG validos: 64x64 ou 64x32. O upload pode levar alguns segundos."
+      ? "Arquivos PNG validos: 64x64 ou 64x32. Em servidores online-mode, outros jogadores veem a skin apos a sincronizacao da Minecraft Services."
       : "Contas locais usam authlib-injector para mostrar a skin dentro do jogo em sessoes locais/offline. No primeiro uso o launcher pode baixar esse componente.";
 
   renderCraftySkinList(account);

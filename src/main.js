@@ -17,6 +17,10 @@ const BMCL_API_ROOT = "https://bmclapi2.bangbang93.com";
 const NEOFORGE_MAVEN_ROOT = "https://maven.neoforged.net";
 const MODRINTH_API_ROOT = "https://api.modrinth.com/v2";
 const CRAFTY_SKINS_URL = "https://crafty.gg/skins";
+const MINECRAFT_PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile";
+const MINECRAFT_PROFILE_SKINS_URL = `${MINECRAFT_PROFILE_URL}/skins`;
+const MINECRAFT_SESSION_PROFILE_ROOT =
+  "https://sessionserver.mojang.com/session/minecraft/profile";
 const AUTHLIB_INJECTOR_VERSION = "1.2.7";
 const AUTHLIB_INJECTOR_BUILD = "55";
 const AUTHLIB_INJECTOR_FILE_NAME = `authlib-injector-${AUTHLIB_INJECTOR_VERSION}.jar`;
@@ -36,6 +40,7 @@ const SETTINGS_SCHEMA_VERSION = 3;
 const REMOTE_GAME_VERSION_LIMIT = 120;
 const MAX_ACCOUNT_SKIN_BYTES = 2 * 1024 * 1024;
 const ACCOUNT_SKIN_PREVIEW_SIZE = 8;
+const SESSION_SKIN_VERIFY_RETRY_DELAY_MS = 65000;
 const SHARED_INSTANCE_DIRECTORIES = [
   "saves",
   "resourcepacks",
@@ -608,10 +613,34 @@ function isLegacyJavaNeeded(version) {
   return false;
 }
 
+function normalizeAccountType(account) {
+  const explicitType = String(account?.type || "").trim().toLowerCase();
+  if (explicitType === "local") return "local";
+  if (explicitType === "microsoft") return "microsoft";
+  return account?.refreshToken ? "microsoft" : "local";
+}
+
+function normalizeStoredAccount(account) {
+  if (!account || !account.profile) return null;
+  const accountId = String(account.accountId || account.profile.id || "").trim();
+  if (!accountId) return null;
+
+  return {
+    ...account,
+    accountId,
+    type: normalizeAccountType(account),
+    profile: {
+      ...account.profile,
+      id: String(account.profile.id || accountId),
+    },
+  };
+}
+
 function publicAccount(account = loadAccount()) {
   if (!account || !account.profile) return null;
+  const type = normalizeAccountType(account);
   return {
-    type: account.type || "microsoft",
+    type,
     name: account.profile.name,
     id: account.profile.id,
     xuid: account.xuid || null,
@@ -628,15 +657,30 @@ function accountsPath() {
 
 function loadAccountsData() {
   const data = readJson(accountsPath(), null);
-  if (data && Array.isArray(data.accounts)) return data;
+  if (data && Array.isArray(data.accounts)) {
+    const accounts = data.accounts.map(normalizeStoredAccount).filter(Boolean);
+    const activeId = accounts.some((account) => account.accountId === data.activeId)
+      ? data.activeId
+      : accounts[0]?.accountId || null;
+    return {
+      ...data,
+      activeId,
+      accounts,
+    };
+  }
   
   // Migrate old account.json if it exists
   const oldData = readJson(userDataPath("account.json"), null);
   if (oldData && oldData.profile) {
-    oldData.accountId = oldData.profile.id;
+    const migratedAccount = normalizeStoredAccount({
+      ...oldData,
+      accountId: oldData.accountId || oldData.profile.id,
+      type: oldData.type || "microsoft",
+    });
+    if (!migratedAccount) return { activeId: null, accounts: [] };
     return {
-      activeId: oldData.profile.id,
-      accounts: [oldData]
+      activeId: migratedAccount.accountId,
+      accounts: [migratedAccount],
     };
   }
   
@@ -685,6 +729,12 @@ function publicAccountSkin(account) {
     label: account.skin.label || "",
     hash: account.skin.hash || null,
     skinId: account.skin.skinId || null,
+    remoteUrl: account.skin.remoteUrl || null,
+    remoteVariant: account.skin.remoteVariant || null,
+    sessionUrl: account.skin.sessionUrl || null,
+    sessionVariant: account.skin.sessionVariant || null,
+    sessionVerifiedAt: account.skin.sessionVerifiedAt || null,
+    verifiedAt: account.skin.verifiedAt || null,
   };
 }
 
@@ -715,18 +765,21 @@ function loadAccount() {
 
 function publicAccounts() {
   const data = loadAccountsData();
-  return data.accounts.map(acc => ({
-    accountId: acc.accountId,
-    type: acc.type || "microsoft",
-    name: acc.profile.name,
-    id: acc.profile.id,
-    xuid: acc.xuid || null,
-    updatedAt: acc.updatedAt || null,
-    demo: Boolean(acc.profile.demo),
-    isActive: acc.accountId === data.activeId,
-    avatarUrl: accountAvatarUrl(acc, 64),
-    skin: publicAccountSkin(acc),
-  }));
+  return data.accounts.map((acc) => {
+    const type = normalizeAccountType(acc);
+    return {
+      accountId: acc.accountId,
+      type,
+      name: acc.profile.name,
+      id: acc.profile.id,
+      xuid: acc.xuid || null,
+      updatedAt: acc.updatedAt || null,
+      demo: Boolean(acc.profile.demo),
+      isActive: acc.accountId === data.activeId,
+      avatarUrl: accountAvatarUrl(acc, 64),
+      skin: publicAccountSkin(acc),
+    };
+  });
 }
 
 function saveMicrosoftAccount(refreshToken, minecraftSession, options = {}) {
@@ -978,6 +1031,167 @@ function buildMultipartFormData(parts, boundary) {
   return Buffer.concat(chunks);
 }
 
+function parseJsonResponseText(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return value;
+  }
+}
+
+function responseErrorMessage(payload, fallback) {
+  if (payload && typeof payload === "object") {
+    return (
+      payload.errorMessage ||
+      payload.developerMessage ||
+      payload.error ||
+      payload.errorType ||
+      fallback
+    );
+  }
+
+  return String(payload || fallback || "").trim();
+}
+
+function activeMinecraftProfileSkin(profile) {
+  const skins = Array.isArray(profile?.skins) ? profile.skins : [];
+  return (
+    skins.find((skin) => String(skin?.state || "").toUpperCase() === "ACTIVE" && skin?.url) ||
+    skins.find((skin) => !skin?.state && skin?.url) ||
+    null
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchLimitedBuffer(url, label, maxBytes = MAX_ACCOUNT_SKIN_BYTES) {
+  const response = await fetch(url, {
+    headers: { "User-Agent": HTTP_USER_AGENT },
+  });
+
+  if (!response.ok) {
+    throw new Error(`${label}: HTTP ${response.status}`);
+  }
+
+  const contentLength = Number(response.headers.get("content-length")) || 0;
+  if (contentLength > maxBytes) {
+    throw new Error(`${label}: resposta grande demais.`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  if (arrayBuffer.byteLength > maxBytes) {
+    throw new Error(`${label}: resposta grande demais.`);
+  }
+
+  return Buffer.from(arrayBuffer);
+}
+
+function skinPixelsMatch(leftBuffer, rightBuffer) {
+  const left = nativeImage.createFromBuffer(leftBuffer);
+  const right = nativeImage.createFromBuffer(rightBuffer);
+  if (left.isEmpty() || right.isEmpty()) return false;
+
+  const leftSize = left.getSize();
+  const rightSize = right.getSize();
+  if (leftSize.width !== rightSize.width || leftSize.height !== rightSize.height) {
+    return false;
+  }
+
+  return left.toBitmap().equals(right.toBitmap());
+}
+
+async function verifyTextureUrlMatchesSelection(textureUrl, textureBuffer, label) {
+  if (!textureUrl) {
+    throw new Error(`${label}: nenhuma URL de skin ativa retornada.`);
+  }
+
+  const remoteBuffer = await fetchLimitedBuffer(textureUrl, label);
+  validateSkinBuffer(remoteBuffer);
+  if (!skinPixelsMatch(textureBuffer, remoteBuffer)) {
+    throw new Error(
+      `${label}: a textura ativa retornada nao corresponde a skin selecionada.`
+    );
+  }
+
+  return remoteBuffer;
+}
+
+function decodeSessionTexturesProperty(profile) {
+  const property = Array.isArray(profile?.properties)
+    ? profile.properties.find((item) => item?.name === "textures" && item?.value)
+    : null;
+
+  if (!property?.value) {
+    return null;
+  }
+
+  const decoded = Buffer.from(String(property.value), "base64").toString("utf8");
+  const textures = JSON.parse(decoded);
+  const skin = textures?.textures?.SKIN || null;
+
+  return {
+    profile,
+    property,
+    textures,
+    skinUrl: skin?.url || "",
+    variant: skin?.metadata?.model === "slim" ? "SLIM" : "CLASSIC",
+    signed: Boolean(property.signature),
+  };
+}
+
+async function fetchMinecraftSessionProfile(account) {
+  const uuid = unsignedUuid(account?.profile?.id);
+  const response = await fetch(`${MINECRAFT_SESSION_PROFILE_ROOT}/${uuid}?unsigned=false`, {
+    headers: { "User-Agent": HTTP_USER_AGENT },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Sessionserver: HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function verifySessionserverSkin(account, textureBuffer, expectedUrl) {
+  const profile = await fetchMinecraftSessionProfile(account);
+  const sessionTextures = decodeSessionTexturesProperty(profile);
+  if (!sessionTextures?.skinUrl) {
+    throw new Error("Sessionserver ainda nao retornou uma skin customizada para esta conta.");
+  }
+  if (!sessionTextures.signed) {
+    throw new Error("Sessionserver retornou a skin sem assinatura oficial.");
+  }
+
+  if (expectedUrl && sessionTextures.skinUrl === expectedUrl) {
+    return sessionTextures;
+  }
+
+  await verifyTextureUrlMatchesSelection(
+    sessionTextures.skinUrl,
+    textureBuffer,
+    "Sessionserver"
+  );
+  return sessionTextures;
+}
+
+async function waitForSessionserverSkin(account, textureBuffer, expectedUrl) {
+  try {
+    return await verifySessionserverSkin(account, textureBuffer, expectedUrl);
+  } catch (firstError) {
+    sendEvent(
+      "warning",
+      `A Minecraft Services aceitou a skin, mas o perfil online ainda nao atualizou (${firstError.message || String(firstError)}). Aguardando a propagacao do sessionserver...`
+    );
+    await sleep(SESSION_SKIN_VERIFY_RETRY_DELAY_MS);
+    return verifySessionserverSkin(account, textureBuffer, expectedUrl);
+  }
+}
+
 function uploadMicrosoftSkinMultipart(accessToken, textureBuffer, variant) {
   return new Promise((resolve, reject) => {
     const boundary = `----SociosClient${crypto.randomBytes(16).toString("hex")}`;
@@ -1001,7 +1215,7 @@ function uploadMicrosoftSkinMultipart(accessToken, textureBuffer, variant) {
     );
 
     const request = https.request(
-      "https://api.minecraftservices.com/minecraft/profile/skins",
+      MINECRAFT_PROFILE_SKINS_URL,
       {
         method: "POST",
         headers: {
@@ -1018,16 +1232,21 @@ function uploadMicrosoftSkinMultipart(accessToken, textureBuffer, variant) {
         response.on("data", (chunk) => chunks.push(chunk));
         response.on("end", () => {
           const message = Buffer.concat(chunks).toString("utf8").trim();
+          const payload = parseJsonResponseText(message);
           if ((response.statusCode || 0) >= 200 && (response.statusCode || 0) < 300) {
-            resolve(message);
+            resolve(payload);
             return;
           }
 
+          const detail = responseErrorMessage(
+            payload,
+            `HTTP ${response.statusCode || 0}`
+          );
           reject(
             new Error(
-              message
-                ? `Falha ao atualizar a skin da conta Microsoft: ${message}`
-                : `Falha ao atualizar a skin da conta Microsoft: HTTP ${response.statusCode || 0}`
+              detail
+                ? `Falha ao atualizar a skin da conta Microsoft: ${detail}`
+                : `Falha ao atualizar a skin da conta Microsoft.`
             )
           );
         });
@@ -1042,10 +1261,90 @@ function uploadMicrosoftSkinMultipart(accessToken, textureBuffer, variant) {
 
 async function applyMicrosoftSkinBuffer(account, textureBuffer, variant) {
   const { xbox, minecraft } = await refreshMinecraftAccount(account);
-  await uploadMicrosoftSkinMultipart(minecraft.mcToken, textureBuffer, variant);
+  const uploadedProfile = await uploadMicrosoftSkinMultipart(
+    minecraft.mcToken,
+    textureBuffer,
+    variant
+  );
 
   await minecraft.refresh(true);
   saveMicrosoftAccount(xbox.save(), minecraft, { makeActive: false });
+
+  const profile = minecraft.profile || uploadedProfile;
+  const activeSkin =
+    activeMinecraftProfileSkin(profile) || activeMinecraftProfileSkin(uploadedProfile);
+
+  if (!activeSkin?.url) {
+    throw new Error(
+      "A Minecraft Services aceitou a requisicao, mas ainda nao confirmou uma skin ativa para esta conta. Tente novamente em alguns instantes."
+    );
+  }
+
+  await verifyTextureUrlMatchesSelection(
+    activeSkin.url,
+    textureBuffer,
+    "Minecraft Services"
+  );
+  const sessionSkin = await waitForSessionserverSkin(account, textureBuffer, activeSkin.url);
+
+  return {
+    profile,
+    activeSkin,
+    sessionSkin,
+  };
+}
+
+async function syncPendingMicrosoftSkin(account) {
+  if (normalizeAccountType(account) !== "microsoft") return null;
+  if (!account?.skin?.localOnly || !account?.skin?.texturePath) return null;
+  if (!fs.existsSync(account.skin.texturePath)) return null;
+
+  try {
+    sendEvent(
+      "debug",
+      `Sincronizando skin pendente da conta Microsoft ${account.profile.name} com a Minecraft Services.`
+    );
+    const textureBuffer = validateSkinBuffer(fs.readFileSync(account.skin.texturePath));
+    const result = await applyMicrosoftSkinBuffer(
+      account,
+      textureBuffer,
+      account.skin.variant || "classic"
+    );
+    const syncedAt = new Date().toISOString();
+
+    return updateStoredAccount(account.accountId, (currentAccount) => ({
+      ...currentAccount,
+      type: "microsoft",
+      profile: result.profile
+        ? {
+            ...currentAccount.profile,
+            skins: Array.isArray(result.profile.skins)
+              ? result.profile.skins
+              : currentAccount.profile?.skins || [],
+            capes: Array.isArray(result.profile.capes)
+              ? result.profile.capes
+              : currentAccount.profile?.capes || [],
+          }
+        : currentAccount.profile,
+      updatedAt: syncedAt,
+      skin: {
+        ...currentAccount.skin,
+        localOnly: false,
+        remoteUrl: result.activeSkin?.url || currentAccount.skin?.remoteUrl || null,
+        remoteVariant: result.activeSkin?.variant || currentAccount.skin?.remoteVariant || null,
+        sessionUrl: result.sessionSkin?.skinUrl || currentAccount.skin?.sessionUrl || null,
+        sessionVariant: result.sessionSkin?.variant || currentAccount.skin?.sessionVariant || null,
+        sessionVerifiedAt: syncedAt,
+        verifiedAt: syncedAt,
+      },
+    }));
+  } catch (error) {
+    sendEvent(
+      "warning",
+      `Nao foi possivel sincronizar a skin pendente da conta Microsoft: ${error.message || String(error)}`
+    );
+    return null;
+  }
 }
 
 function updateStoredAccount(accountId, updater) {
@@ -1072,10 +1371,12 @@ async function updateAccountSkin(payload) {
     throw new Error("Conta nao encontrada para atualizar a skin.");
   }
 
+  const accountType = normalizeAccountType(account);
   let textureBuffer;
   let sourceLabel = "Skin personalizada";
   let sourceHash = null;
   let sourceSkinId = null;
+  let microsoftSkinResult = null;
 
   if (source === "crafty") {
     textureBuffer = decodeCraftyTexture(payload?.textureBase64);
@@ -1087,21 +1388,39 @@ async function updateAccountSkin(payload) {
     sourceLabel = payload?.label || "Arquivo local";
   }
 
-  if (account.type === "microsoft") {
-    await applyMicrosoftSkinBuffer(account, textureBuffer, variant);
+  if (accountType === "microsoft") {
+    microsoftSkinResult = await applyMicrosoftSkinBuffer(account, textureBuffer, variant);
   }
 
   const { texturePath, previewPath } = saveAccountSkinAssets(accountId, textureBuffer);
   const updatedAccount = updateStoredAccount(accountId, (currentAccount) => ({
     ...currentAccount,
+    type: normalizeAccountType(currentAccount),
+    profile: microsoftSkinResult?.profile
+      ? {
+          ...currentAccount.profile,
+          skins: Array.isArray(microsoftSkinResult.profile.skins)
+            ? microsoftSkinResult.profile.skins
+            : currentAccount.profile?.skins || [],
+          capes: Array.isArray(microsoftSkinResult.profile.capes)
+            ? microsoftSkinResult.profile.capes
+            : currentAccount.profile?.capes || [],
+        }
+      : currentAccount.profile,
     updatedAt: new Date().toISOString(),
     skin: {
       source,
       variant,
-      localOnly: currentAccount.type !== "microsoft",
+      localOnly: normalizeAccountType(currentAccount) !== "microsoft",
       label: sourceLabel,
       hash: sourceHash,
       skinId: sourceSkinId,
+      remoteUrl: microsoftSkinResult?.activeSkin?.url || null,
+      remoteVariant: microsoftSkinResult?.activeSkin?.variant || null,
+      sessionUrl: microsoftSkinResult?.sessionSkin?.skinUrl || null,
+      sessionVariant: microsoftSkinResult?.sessionSkin?.variant || null,
+      sessionVerifiedAt: microsoftSkinResult ? new Date().toISOString() : null,
+      verifiedAt: microsoftSkinResult ? new Date().toISOString() : null,
       texturePath,
       previewPath,
       updatedAt: new Date().toISOString(),
@@ -1110,8 +1429,8 @@ async function updateAccountSkin(payload) {
 
   sendEvent(
     "success",
-    updatedAccount.type === "microsoft"
-      ? `Skin da conta ${updatedAccount.profile.name} atualizada.`
+    normalizeAccountType(updatedAccount) === "microsoft"
+      ? `Skin da conta ${updatedAccount.profile.name} enviada e confirmada no perfil online do Minecraft.`
       : `Skin da conta local ${updatedAccount.profile.name} atualizada no launcher e aplicada ao jogo local.`
   );
 
@@ -5247,7 +5566,13 @@ async function runMinecraft(mode, input) {
 
   try {
     const settings = saveSettings(input.settings || {});
-    const activeAccount = loadAccount();
+    let activeAccount = loadAccount();
+    if (mode === "launch") {
+      const syncedAccount = await syncPendingMicrosoftSkin(activeAccount);
+      if (syncedAccount) {
+        activeAccount = syncedAccount;
+      }
+    }
     const authorization = await getAuthorization();
     const preparedVersion = await ensureVersionFiles(input.version);
     const client = mode === "install" ? new InstallOnlyClient() : new Client();
