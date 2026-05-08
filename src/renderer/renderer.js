@@ -324,7 +324,7 @@ function modpackLoaderLabel(loaderType) {
   if (normalized === "fabric") return "Fabric";
   if (normalized === "forge") return "Forge";
   if (normalized === "neoforge") return "NeoForge";
-  if (normalized === "forgeoptifine") return "Forge + OptiFine";
+  if (normalized === "forgeoptifine") return "ForgeOptifine";
   return normalized;
 }
 
@@ -362,26 +362,6 @@ function renderModpackVersionOptions() {
     button.innerHTML = `
       <span class="modpack-version-copy">
         <strong>${escapeHtml(version.name || version.versionNumber || version.id)}</strong>
-        <small>${escapeHtml(
-          [
-            version.versionNumber ? `Pack ${version.versionNumber}` : "",
-            version.minecraftVersion ? `MC ${version.minecraftVersion}` : "",
-            modpackLoaderLabel(version.loaderType),
-            version.publishedAt ? formatDate(version.publishedAt) : "",
-          ]
-            .filter(Boolean)
-            .join(" - ")
-        )}</small>
-      </span>
-      <span class="tag-row">
-        <span class="tag ${escapeHtml(String(version.loaderType || "vanilla").toLowerCase())}">${escapeHtml(
-          modpackLoaderLabel(version.loaderType)
-        )}</span>
-        ${
-          version.featured
-            ? '<span class="tag installed">destaque</span>'
-            : ""
-        }
       </span>
     `;
     button.addEventListener("click", () => installModpackVersion(state.pendingModpack, version.id));
@@ -983,7 +963,7 @@ function versionLabel(version) {
     forge: "forge",
     neoforge: "neoforge",
     optifine: "optifine",
-    forgeoptifine: "forge+optifine",
+    forgeoptifine: "forgeoptifine",
     modpack: "modpack",
     custom: "custom",
     local: "local",
@@ -991,7 +971,40 @@ function versionLabel(version) {
   return map[version.type] || version.type || "release";
 }
 
+function loaderDisplayName(loaderType) {
+  const value = String(loaderType || "").toLowerCase();
+  if (value === "optifine") return "Optifine";
+  if (value === "forge") return "Forge";
+  if (value === "neoforge") return "NeoForge";
+  if (value === "fabric") return "Fabric";
+  if (value === "forgeoptifine") return "ForgeOptifine";
+  return modpackLoaderLabel(loaderType);
+}
+
+function isForgeOptiFineVersion(version) {
+  return String(version?.loaderType || version?.type || "").toLowerCase() === "forgeoptifine";
+}
+
 function versionDisplayName(version) {
+  const loaderType = String(version?.loaderType || version?.type || "").toLowerCase();
+  const minecraftVersion = version?.minecraftVersion || version?.inheritsFrom || "";
+
+  if (isForgeOptiFineVersion(version)) {
+    return `ForgeOptifine ${minecraftVersion || version.id || ""}`.trim();
+  }
+
+  if (loaderType === "fabric") {
+    const parts = [loaderDisplayName(loaderType), minecraftVersion];
+    if (version?.loaderVersion) {
+      parts.push(`Loader ${version.loaderVersion}`);
+    }
+    return parts.filter(Boolean).join(" ").trim() || version?.id || "-";
+  }
+
+  if (["optifine", "forge", "neoforge"].includes(loaderType)) {
+    return `${loaderDisplayName(loaderType)} ${minecraftVersion || version?.id || ""}`.trim();
+  }
+
   return version?.modpackTitle || version?.id || "-";
 }
 
@@ -1012,6 +1025,20 @@ function downloadedModpacks() {
 }
 
 function versionDescription(version) {
+  const loaderType = String(version?.loaderType || version?.type || "").toLowerCase();
+
+  if (isForgeOptiFineVersion(version)) {
+    return "";
+  }
+
+  if (["optifine", "forge", "neoforge"].includes(loaderType)) {
+    return version?.loaderVersion ? `Loader ${version.loaderVersion}` : "";
+  }
+
+  if (loaderType === "fabric") {
+    return "";
+  }
+
   const parts = [versionLabel(version)];
   if (version.modpackVersionNumber) parts.push(`pack ${version.modpackVersionNumber}`);
   if (version.minecraftVersion) parts.push(`MC ${version.minecraftVersion}`);
@@ -1114,10 +1141,41 @@ function compareVersions(left, right) {
   });
 }
 
+function shouldDeduplicateMinecraftVersion(version) {
+  const loaderType = String(version?.loaderType || version?.type || "").toLowerCase();
+  return loaderType === "optifine" || loaderType === "neoforge" || loaderType === "forge";
+}
+
+function deduplicateListedVersions(versions) {
+  const deduplicated = [];
+  const seen = new Set();
+
+  for (const version of versions) {
+    if (!shouldDeduplicateMinecraftVersion(version)) {
+      deduplicated.push(version);
+      continue;
+    }
+
+    const minecraftVersion = String(version?.minecraftVersion || version?.inheritsFrom || "").trim();
+    const loaderType = String(version?.loaderType || version?.type || "").toLowerCase();
+    const key = `${loaderType}:${minecraftVersion}`;
+
+    if (!minecraftVersion || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduplicated.push(version);
+  }
+
+  return deduplicated;
+}
+
 function filteredVersions() {
   const query = elements.versionSearch.value.trim().toLowerCase();
   const filter = elements.versionFilter.value;
-  return state.versions
+  return deduplicateListedVersions(
+    state.versions
     .filter((version) => !isDownloadedModpack(version))
     .filter((version) => {
       if (filter === "all") return true;
@@ -1131,7 +1189,8 @@ function filteredVersions() {
         String(version.modpackTitle || "").toLowerCase().includes(query)
     )
     .sort(compareVersions)
-    .slice(0, 1200);
+      .slice(0, 1200)
+      );
 }
 
 function renderVersions() {
@@ -1157,16 +1216,6 @@ function renderVersions() {
     button.innerHTML = `
       <span class="version-main">
         <strong>${escapeHtml(versionDisplayName(version))}</strong>
-        <small>${
-          version.modpackTitle && version.modpackTitle !== version.id
-            ? escapeHtml(version.id)
-            : formatDate(version.releaseTime)
-        }</small>
-      </span>
-      <span class="tag-row">
-        <span class="tag ${version.type}">${escapeHtml(versionLabel(version))}</span>
-        ${version.local ? '<span class="tag local">local</span>' : ""}
-        ${version.installed ? '<span class="tag installed">instalada</span>' : ""}
       </span>
     `;
     button.addEventListener("click", () => {
@@ -1210,19 +1259,6 @@ function renderDownloadedModpacks() {
     button.innerHTML = `
       <span class="version-main">
         <strong>${escapeHtml(versionDisplayName(version))}</strong>
-        <small>${escapeHtml(
-          [
-            version.modpackVersionNumber ? `Pack ${version.modpackVersionNumber}` : "",
-            version.minecraftVersion ? `MC ${version.minecraftVersion}` : "",
-            version.id,
-          ]
-            .filter(Boolean)
-            .join(" - ")
-        )}</small>
-      </span>
-      <span class="tag-row">
-        <span class="tag modpack">modpack</span>
-        ${version.installed ? '<span class="tag installed">instalada</span>' : ""}
       </span>
     `;
     button.addEventListener("click", () => {
@@ -1271,8 +1307,6 @@ function renderModpacks() {
       card.classList.add("selected");
     }
 
-    const gameVersions = (modpack.gameVersions || []).slice(0, 3).join(", ");
-    const categories = (modpack.categories || []).slice(0, 4);
     const button = document.createElement("button");
     button.className = "secondary";
     button.type = "button";
@@ -1289,22 +1323,12 @@ function renderModpacks() {
       }
       <div class="modpack-copy">
         <strong>${escapeHtml(modpack.title)}</strong>
-        <small>${escapeHtml(modpack.author ? `por ${modpack.author}` : modpack.slug)}</small>
-        <p>${escapeHtml(modpack.description || "Sem descricao.")}</p>
-        <div class="tag-row modpack-tags">
-          ${gameVersions ? `<span class="tag release">${escapeHtml(gameVersions)}</span>` : ""}
-          ${categories.map((category) => `<span class="tag local">${escapeHtml(category)}</span>`).join("")}
-        </div>
       </div>
       <div class="modpack-actions"></div>
     `;
 
     const actions = card.querySelector(".modpack-actions");
     actions.appendChild(button);
-
-    const stats = document.createElement("small");
-    stats.textContent = `${formatCompactNumber(modpack.downloads)} downloads`;
-    actions.appendChild(stats);
 
     fragment.appendChild(card);
   });
@@ -1732,8 +1756,6 @@ function setDownloadProgress(modpackName, percent, downloadedBytes, totalBytes, 
 }
 
 function handleLauncherEvent(event) {
-  if (!event.silent) appendLog(event.type, event.message);
-
   if (event.type === "install") {
     setBusy(true);
     // Use modpack name from event message if available, otherwise from state

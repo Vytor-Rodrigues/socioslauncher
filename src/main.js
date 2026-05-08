@@ -1144,6 +1144,19 @@ function decodeSessionTexturesProperty(profile) {
   };
 }
 
+function sessionSkinPropertyMapJson(sessionSkin) {
+  const property = sessionSkin?.property;
+  if (!property?.value || !property?.signature) return null;
+
+  return JSON.stringify([
+    {
+      name: "textures",
+      value: property.value,
+      signature: property.signature,
+    },
+  ]);
+}
+
 async function fetchMinecraftSessionProfile(account) {
   const uuid = unsignedUuid(account?.profile?.id);
   const response = await fetch(`${MINECRAFT_SESSION_PROFILE_ROOT}/${uuid}?unsigned=false`, {
@@ -1190,6 +1203,18 @@ async function waitForSessionserverSkin(account, textureBuffer, expectedUrl) {
     await sleep(SESSION_SKIN_VERIFY_RETRY_DELAY_MS);
     return verifySessionserverSkin(account, textureBuffer, expectedUrl);
   }
+}
+
+async function currentSignedSessionSkin(account) {
+  const profile = await fetchMinecraftSessionProfile(account);
+  const sessionSkin = decodeSessionTexturesProperty(profile);
+  if (!sessionSkin?.skinUrl) {
+    throw new Error("Sessionserver nao retornou skin customizada para esta conta.");
+  }
+  if (!sessionSkin.signed) {
+    throw new Error("Sessionserver retornou a skin sem assinatura oficial.");
+  }
+  return sessionSkin;
 }
 
 function uploadMicrosoftSkinMultipart(accessToken, textureBuffer, variant) {
@@ -1578,6 +1603,7 @@ async function getCraftySkinCatalog(options = {}) {
 function redactSecrets(input) {
   return String(input)
     .replace(/(--accessToken\s+)[^\s]+/gi, "$1[redacted]")
+    .replace(/(--(?:user|profile)Properties\s+)[^\s]+/gi, "$1[redacted]")
     .replace(/(--clientId\s+)[^\s]+/gi, "$1[redacted]")
     .replace(/(access_token["':=\s]+)[^"',\s]+/gi, "$1[redacted]")
     .replace(/(refresh_token["':=\s]+)[^"',\s]+/gi, "$1[redacted]")
@@ -1812,6 +1838,139 @@ function writeTextResponse(response, statusCode, message) {
   response.end(body);
 }
 
+function versionNeedsMicrosoftLanSkinCompatibility(version) {
+  const loaderType = String(version?.loaderType || "").trim().toLowerCase();
+  const type = String(version?.type || "").trim().toLowerCase();
+  const versionId = String(version?.id || "").trim().toLowerCase();
+
+  return [loaderType, type, versionId].some((value) => value === "optifine");
+}
+
+function normalizeAuthorizationUserProperties(userProperties) {
+  if (typeof userProperties === "string") {
+    const trimmed = userProperties.trim();
+    if (!trimmed) return "{}";
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return JSON.stringify(parsed);
+      }
+    } catch (_error) {
+      // Keep compatibility by falling back to an empty legacy property map.
+    }
+
+    return "{}";
+  }
+
+  if (userProperties && typeof userProperties === "object" && !Array.isArray(userProperties)) {
+    return JSON.stringify(userProperties);
+  }
+
+  return "{}";
+}
+
+async function prepareMicrosoftLegacyLanSkinRuntime(
+  account,
+  authorization,
+  context,
+  sessionSkin
+) {
+  const textureBuffer = validateSkinBuffer(
+    await fetchLimitedBuffer(
+      sessionSkin.skinUrl,
+      "Skin oficial da conta Microsoft"
+    )
+  );
+
+  const [jarPath, localSkinServer] = await Promise.all([
+    ensureAuthlibInjectorJar(),
+    startInjectedSkinServer(
+      {
+        id: account.profile.id,
+        name: account.profile.name,
+      },
+      normalizeSkinVariant(sessionSkin.variant),
+      textureBuffer
+    ),
+  ]);
+
+  addLaunchContextCleanup(context, () => localSkinServer.close());
+  sendEvent(
+    "debug",
+    `Skin oficial da conta Microsoft sera aplicada via authlib-injector (${localSkinServer.rootUrl}) para compatibilidade com LAN nesta versao.`
+  );
+
+  return {
+    authorization: {
+      ...authorization,
+      client_token:
+        authorization.client_token || crypto.randomUUID().replace(/-/g, ""),
+      user_properties: normalizeAuthorizationUserProperties(
+        authorization.user_properties
+      ),
+      meta: {
+        ...(authorization.meta || {}),
+        type: "msa",
+        xuid: authorization.meta?.xuid || account.xuid || "0",
+      },
+    },
+    extraGameArgs: [],
+    extraJvmArgs: [
+      `-javaagent:${jarPath}=${localSkinServer.rootUrl}`,
+      "-Dauthlibinjector.side=client",
+    ],
+  };
+}
+
+async function prepareMicrosoftLanSkinRuntime(account, authorization, version, context) {
+  if (normalizeAccountType(account) !== "microsoft") {
+    return {
+      authorization,
+      extraGameArgs: [],
+      extraJvmArgs: [],
+    };
+  }
+
+  if (!versionNeedsMicrosoftLanSkinCompatibility(version)) {
+    return {
+      authorization: {
+        ...authorization,
+        user_properties: normalizeAuthorizationUserProperties(
+          authorization.user_properties
+        ),
+      },
+      extraGameArgs: [],
+      extraJvmArgs: [],
+    };
+  }
+
+  try {
+    const sessionSkin = await currentSignedSessionSkin(account);
+    return prepareMicrosoftLegacyLanSkinRuntime(
+      account,
+      authorization,
+      context,
+      sessionSkin
+    );
+  } catch (error) {
+    sendEvent(
+      "warning",
+      `Nao foi possivel preparar a skin assinada para mundos LAN: ${error.message || String(error)}`
+    );
+    return {
+      authorization: {
+        ...authorization,
+        user_properties: normalizeAuthorizationUserProperties(
+          authorization.user_properties
+        ),
+      },
+      extraGameArgs: [],
+      extraJvmArgs: [],
+    };
+  }
+}
+
 function readJsonRequestBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -1839,10 +1998,10 @@ function readJsonRequestBody(request) {
   });
 }
 
-function createLocalSkinTexturesProperty(account, rootUrl, textureHash) {
+function createInjectedSkinTexturesProperty(profile, variant, rootUrl, textureHash) {
   const textures = {
     SKIN:
-      account.skin?.variant === "slim"
+      variant === "slim"
         ? {
             url: `${rootUrl}/textures/${textureHash}`,
             metadata: { model: "slim" },
@@ -1855,16 +2014,21 @@ function createLocalSkinTexturesProperty(account, rootUrl, textureHash) {
   return Buffer.from(
     JSON.stringify({
       timestamp: Date.now(),
-      profileId: unsignedUuid(account.profile.id),
-      profileName: account.profile.name,
+      profileId: unsignedUuid(profile.id),
+      profileName: profile.name,
       textures,
     }),
     "utf8"
   ).toString("base64");
 }
 
-function createLocalSkinProfileResponse(account, rootUrl, textureHash, withSignature) {
-  const texturesValue = createLocalSkinTexturesProperty(account, rootUrl, textureHash);
+function createInjectedSkinProfileResponse(profile, variant, rootUrl, textureHash, withSignature) {
+  const texturesValue = createInjectedSkinTexturesProperty(
+    profile,
+    variant,
+    rootUrl,
+    textureHash
+  );
   const property = {
     name: "textures",
     value: texturesValue,
@@ -1875,23 +2039,17 @@ function createLocalSkinProfileResponse(account, rootUrl, textureHash, withSigna
   }
 
   return {
-    id: unsignedUuid(account.profile.id),
-    name: account.profile.name,
+    id: unsignedUuid(profile.id),
+    name: profile.name,
     properties: [property],
   };
 }
 
-async function startLocalSkinServer(account) {
-  const texturePath = account?.skin?.texturePath;
-  if (!texturePath || !fs.existsSync(texturePath)) {
-    throw new Error("A textura da skin local nao foi encontrada para iniciar o servidor interno.");
-  }
-
-  const textureBuffer = validateSkinBuffer(fs.readFileSync(texturePath));
+async function startInjectedSkinServer(profile, variant, textureBuffer) {
   const textureHash = crypto.createHash("sha256").update(textureBuffer).digest("hex");
-  const accountName = String(account.profile?.name || "");
+  const accountName = String(profile?.name || "");
   const accountNameLower = accountName.toLowerCase();
-  const accountUuid = unsignedUuid(account.profile?.id);
+  const accountUuid = unsignedUuid(profile?.id);
 
   const server = http.createServer(async (request, response) => {
     const rootUrl = `http://127.0.0.1:${server.address().port}`;
@@ -1950,7 +2108,7 @@ async function startLocalSkinServer(account) {
         writeJsonResponse(
           response,
           200,
-          createLocalSkinProfileResponse(account, rootUrl, textureHash, true)
+          createInjectedSkinProfileResponse(profile, variant, rootUrl, textureHash, true)
         );
         return;
       }
@@ -1977,7 +2135,13 @@ async function startLocalSkinServer(account) {
         writeJsonResponse(
           response,
           200,
-          createLocalSkinProfileResponse(account, rootUrl, textureHash, withSignature)
+          createInjectedSkinProfileResponse(
+            profile,
+            variant,
+            rootUrl,
+            textureHash,
+            withSignature
+          )
         );
         return;
       }
@@ -2013,6 +2177,22 @@ async function startLocalSkinServer(account) {
   };
 }
 
+async function startLocalSkinServer(account) {
+  const texturePath = account?.skin?.texturePath;
+  if (!texturePath || !fs.existsSync(texturePath)) {
+    throw new Error("A textura da skin local nao foi encontrada para iniciar o servidor interno.");
+  }
+
+  return startInjectedSkinServer(
+    {
+      id: account.profile.id,
+      name: account.profile.name,
+    },
+    normalizeSkinVariant(account.skin?.variant),
+    validateSkinBuffer(fs.readFileSync(texturePath))
+  );
+}
+
 async function prepareLocalSkinRuntime(account, authorization, context) {
   if ((account?.type || "microsoft") !== "local") {
     return {
@@ -2045,10 +2225,9 @@ async function prepareLocalSkinRuntime(account, authorization, context) {
         ...authorization,
         client_token:
           authorization.client_token || crypto.randomUUID().replace(/-/g, ""),
-        user_properties:
-          typeof authorization.user_properties === "string"
-            ? authorization.user_properties
-            : JSON.stringify(authorization.user_properties || {}),
+        user_properties: normalizeAuthorizationUserProperties(
+          authorization.user_properties
+        ),
         meta: {
           ...(authorization.meta || {}),
           type: "msa",
@@ -2638,8 +2817,17 @@ function hasLegacyGameArguments(versionJson) {
     versionJson.minecraftArguments.trim().length > 0;
 }
 
-function hasOptiFineTweakerArgument(versionJson) {
-  const tweakClass = "optifine.OptiFineTweaker";
+const OPTIFINE_TWEAKER = "optifine.OptiFineTweaker";
+const OPTIFINE_FORGE_TWEAKER = "optifine.OptiFineForgeTweaker";
+const OPTIFINE_TWEAKER_CLASSES = [OPTIFINE_TWEAKER, OPTIFINE_FORGE_TWEAKER];
+
+function expectedOptiFineTweaker(loaderType) {
+  return String(loaderType || "").toLowerCase() === "forgeoptifine"
+    ? OPTIFINE_FORGE_TWEAKER
+    : OPTIFINE_TWEAKER;
+}
+
+function hasOptiFineTweakerArgument(versionJson, tweakClass = OPTIFINE_TWEAKER) {
   const structuredArgs = Array.isArray(versionJson?.arguments?.game)
     ? versionJson.arguments.game
     : [];
@@ -2650,9 +2838,66 @@ function hasOptiFineTweakerArgument(versionJson) {
   }
 
   if (!hasLegacyGameArguments(versionJson)) return false;
-  return /(^|\s)--tweakClass\s+optifine\.OptiFineTweaker(?:\s|$)/.test(
-    versionJson.minecraftArguments
+  const tweakPattern = new RegExp(
+    `(^|\\s)--tweakClass\\s+${String(tweakClass).replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(?:\\s|$)`
   );
+  return tweakPattern.test(versionJson.minecraftArguments);
+}
+
+function replaceStructuredOptiFineTweakerArgument(gameArguments, tweakClass) {
+  const args = Array.isArray(gameArguments) ? [...gameArguments] : [];
+  const output = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const current = args[index];
+    const next = args[index + 1];
+    if (current === "--tweakClass" && OPTIFINE_TWEAKER_CLASSES.includes(next)) {
+      index += 1;
+      continue;
+    }
+    output.push(current);
+  }
+
+  output.push("--tweakClass", tweakClass);
+  return output;
+}
+
+function replaceLegacyOptiFineTweakerArgument(minecraftArguments, tweakClass) {
+  const baseArguments = String(minecraftArguments || "")
+    .replace(/(^|\s)--tweakClass\s+optifine\.OptiFine(?:Forge)?Tweaker(?=\s|$)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return appendTweakClassArgument(baseArguments, tweakClass);
+}
+
+function normalizeInstalledOptiFineTweaker(versionJson, loaderType) {
+  if (!versionJson || typeof versionJson !== "object") return { changed: false, versionJson };
+
+  const tweakClass = expectedOptiFineTweaker(loaderType);
+  let changed = false;
+  const normalized = normalizeVersionShape(cloneJson(versionJson));
+
+  if (Array.isArray(normalized?.arguments?.game)) {
+    const replaced = replaceStructuredOptiFineTweakerArgument(normalized.arguments.game, tweakClass);
+    if (JSON.stringify(replaced) !== JSON.stringify(normalized.arguments.game)) {
+      normalized.arguments.game = replaced;
+      changed = true;
+    }
+  }
+
+  if (hasLegacyGameArguments(normalized)) {
+    const replaced = replaceLegacyOptiFineTweakerArgument(
+      normalized.minecraftArguments,
+      tweakClass
+    );
+    if (replaced !== normalized.minecraftArguments) {
+      normalized.minecraftArguments = replaced;
+      changed = true;
+    }
+  }
+
+  return { changed, versionJson: normalized };
 }
 
 function appendTweakClassArgument(minecraftArguments, tweakClass) {
@@ -2892,6 +3137,24 @@ function compareNumericSegments(leftValue, rightValue) {
     if (left !== right) return left - right;
   }
   return 0;
+}
+
+function selectLatestVersionsByMinecraft(versions, compareVersions) {
+  const latestByMinecraft = new Map();
+
+  for (const version of Array.isArray(versions) ? versions : []) {
+    const minecraftVersion = String(version?.minecraftVersion || version?.inheritsFrom || "").trim();
+    if (!minecraftVersion) continue;
+
+    const current = latestByMinecraft.get(minecraftVersion);
+    if (!current || compareVersions(version, current) > 0) {
+      latestByMinecraft.set(minecraftVersion, version);
+    }
+  }
+
+  return Array.from(latestByMinecraft.values()).sort((left, right) =>
+    compareNumericSegments(right.minecraftVersion, left.minecraftVersion)
+  );
 }
 
 function neoForgeArtifactName(minecraftVersion) {
@@ -3732,31 +3995,35 @@ async function loadFabricCatalog(manifest, force = false) {
         `${FABRIC_META_ROOT}/${encodeURIComponent(minecraftVersion)}`,
         `Fabric ${minecraftVersion}`
       );
-      const latest = Array.isArray(loaders) ? loaders[0] : null;
-      if (!latest?.loader?.version) return null;
+      if (!Array.isArray(loaders) || !loaders.length) return null;
 
-      const id = formatFabricVersionId(minecraftVersion, latest.loader.version);
-      return {
-        id,
-        type: "fabric",
-        url: `${FABRIC_META_ROOT}/${encodeURIComponent(minecraftVersion)}/${encodeURIComponent(
-          latest.loader.version
-        )}/profile/json`,
-        time: releaseTimeById.get(minecraftVersion) || new Date().toISOString(),
-        releaseTime: releaseTimeById.get(minecraftVersion) || new Date().toISOString(),
-        complianceLevel: null,
-        installed: isVersionInstalled(id),
-        local: false,
-        inheritsFrom: minecraftVersion,
-        remoteLoader: true,
-        loaderType: "fabric",
-        loaderVersion: latest.loader.version,
-        minecraftVersion,
-        stable: latest.loader.stable !== false,
-      };
+      return loaders
+        .filter((entry) => entry?.loader?.version)
+        .map((entry) => {
+          const loaderVersion = entry.loader.version;
+          const id = formatFabricVersionId(minecraftVersion, loaderVersion);
+          return {
+            id,
+            type: "fabric",
+            url: `${FABRIC_META_ROOT}/${encodeURIComponent(minecraftVersion)}/${encodeURIComponent(
+              loaderVersion
+            )}/profile/json`,
+            time: releaseTimeById.get(minecraftVersion) || new Date().toISOString(),
+            releaseTime: releaseTimeById.get(minecraftVersion) || new Date().toISOString(),
+            complianceLevel: null,
+            installed: isVersionInstalled(id),
+            local: false,
+            inheritsFrom: minecraftVersion,
+            remoteLoader: true,
+            loaderType: "fabric",
+            loaderVersion,
+            minecraftVersion,
+            stable: entry.loader.stable !== false,
+          };
+        });
     });
 
-    return { versions };
+    return { versions: versions.flat() };
   });
 }
 
@@ -3770,7 +4037,7 @@ async function loadForgeCatalog(manifest, force = false) {
       );
       if (!Array.isArray(list) || !list.length) return null;
 
-      return [...list]
+      const latest = [...list]
         .filter((item) =>
           Array.isArray(item?.files) &&
           item.files.some((file) => file?.category === "installer" && file?.format === "jar")
@@ -3780,32 +4047,31 @@ async function loadForgeCatalog(manifest, force = false) {
             return (right.build || 0) - (left.build || 0);
           }
           return new Date(right.modified || 0) - new Date(left.modified || 0);
-        })
-        .map((item) => {
-          if (!item?.version) return null;
-          const id = formatForgeVersionId(minecraftVersion, item.version);
-          return {
-            id,
-            type: "forge",
-            url: null,
-            time: item.modified || new Date().toISOString(),
-            releaseTime: item.modified || new Date().toISOString(),
-            complianceLevel: null,
-            installed: isVersionInstalled(id),
-            local: false,
-            inheritsFrom: minecraftVersion,
-            remoteLoader: true,
-            loaderType: "forge",
-            loaderVersion: item.version,
-            minecraftVersion,
-            installerUrl: forgeInstallerUrls(minecraftVersion, item.version, item.branch || "")[0],
-            installerUrls: forgeInstallerUrls(minecraftVersion, item.version, item.branch || ""),
-          };
-        })
-        .filter(Boolean);
+        })[0];
+
+      if (!latest?.version) return null;
+
+      const id = formatForgeVersionId(minecraftVersion, latest.version);
+      return {
+        id,
+        type: "forge",
+        url: null,
+        time: latest.modified || new Date().toISOString(),
+        releaseTime: latest.modified || new Date().toISOString(),
+        complianceLevel: null,
+        installed: isVersionInstalled(id),
+        local: false,
+        inheritsFrom: minecraftVersion,
+        remoteLoader: true,
+        loaderType: "forge",
+        loaderVersion: latest.version,
+        minecraftVersion,
+        installerUrl: forgeInstallerUrls(minecraftVersion, latest.version, latest.branch || "")[0],
+        installerUrls: forgeInstallerUrls(minecraftVersion, latest.version, latest.branch || ""),
+      };
     });
 
-    return { versions: versions.flat() };
+    return { versions };
   });
 }
 
@@ -3814,41 +4080,41 @@ async function loadOptiFineCatalog(_manifest, force = false) {
     const list = await fetchJson(`${BMCL_API_ROOT}/optifine/versionlist`, "OptiFine");
     if (!Array.isArray(list)) return { versions: [] };
 
-    const versions = list
-      .map((item) => {
-        if (!item?.mcversion || !item?.type || !item?.patch) return null;
-        const lookupVersion = String(item.mcversion);
-        const minecraftVersion = denormalizeOptiFineGameVersion(lookupVersion);
-        const preview = isOptiFinePreviewItem(item);
-        const optiFineVersion = `${item.type}_${item.patch}`;
-        const id = formatOptiFineVersionId(minecraftVersion, optiFineVersion);
-        return {
-        id,
-        type: "optifine",
-        url: null,
-        time: new Date().toISOString(),
-        releaseTime: new Date().toISOString(),
-        complianceLevel: null,
-        installed: isVersionInstalled(id),
-        local: false,
-        inheritsFrom: minecraftVersion,
-        remoteLoader: true,
-        loaderType: "optifine",
-        loaderVersion: optiFineVersion,
-        minecraftVersion,
-        preview,
-        installerUrl: `${BMCL_API_ROOT}/optifine/${encodeURIComponent(
-          normalizeOptiFineLookupVersion(minecraftVersion)
-        )}/${encodeURIComponent(item.type)}/${encodeURIComponent(item.patch)}`,
-        };
-      })
-      .filter(Boolean)
-      .sort((left, right) => {
-        const mcCompare = compareNumericSegments(right.minecraftVersion, left.minecraftVersion);
-        if (mcCompare !== 0) return mcCompare;
-        if (left.preview !== right.preview) return left.preview ? 1 : -1;
-        return compareNumericSegments(right.loaderVersion, left.loaderVersion);
-      })
+    const versions = selectLatestVersionsByMinecraft(
+      list
+        .map((item) => {
+          if (!item?.mcversion || !item?.type || !item?.patch) return null;
+          const lookupVersion = String(item.mcversion);
+          const minecraftVersion = denormalizeOptiFineGameVersion(lookupVersion);
+          const preview = isOptiFinePreviewItem(item);
+          const optiFineVersion = `${item.type}_${item.patch}`;
+          const id = formatOptiFineVersionId(minecraftVersion, optiFineVersion);
+          return {
+            id,
+            type: "optifine",
+            url: null,
+            time: new Date().toISOString(),
+            releaseTime: new Date().toISOString(),
+            complianceLevel: null,
+            installed: isVersionInstalled(id),
+            local: false,
+            inheritsFrom: minecraftVersion,
+            remoteLoader: true,
+            loaderType: "optifine",
+            loaderVersion: optiFineVersion,
+            minecraftVersion,
+            preview,
+            installerUrl: `${BMCL_API_ROOT}/optifine/${encodeURIComponent(
+              normalizeOptiFineLookupVersion(minecraftVersion)
+            )}/${encodeURIComponent(item.type)}/${encodeURIComponent(item.patch)}`,
+          };
+        })
+        .filter(Boolean),
+      (next, current) => {
+        if (next.preview !== current.preview) return next.preview ? -1 : 1;
+        return compareNumericSegments(next.loaderVersion, current.loaderVersion);
+      }
+    )
       .map((version) => {
         const { preview, ...rest } = version;
         return rest;
@@ -3876,30 +4142,43 @@ async function loadNeoForgeCatalog(manifest, force = false) {
       ).catch(() => ({ versions: [] })),
     ]);
 
-    return {
-      versions: [
+    const versions = selectLatestVersionsByMinecraft(
+      [
         ...(Array.isArray(modernResponse?.versions) ? modernResponse.versions : []),
         ...(Array.isArray(legacyResponse?.versions) ? legacyResponse.versions : []),
       ]
         .map(neoForgeVersionInfo)
         .filter((versionInfo) => versionInfo && candidates.has(versionInfo.minecraftVersion))
-        .sort((left, right) => {
-          const mcCompare = compareNumericSegments(right.minecraftVersion, left.minecraftVersion);
-          if (mcCompare !== 0) return mcCompare;
-          return compareNumericSegments(right.rawVersion, left.rawVersion);
-        })
         .map((versionInfo) => ({
           ...remoteNeoForgeVersion(versionInfo),
           time: releaseTimeById.get(versionInfo.minecraftVersion) || new Date().toISOString(),
           releaseTime: releaseTimeById.get(versionInfo.minecraftVersion) || new Date().toISOString(),
           stable: versionInfo.stable,
         })),
-    };
+      (next, current) => compareNumericSegments(next.rawVersion, current.rawVersion)
+    );
+
+    return { versions };
   });
 }
 
 function buildForgeOptiFineCatalog(forgeVersions, optiFineVersions) {
   const optiFineByMinecraft = new Map();
+  const forgeByMinecraft = new Map();
+
+  for (const version of Array.isArray(forgeVersions) ? forgeVersions : []) {
+    const current = forgeByMinecraft.get(version.minecraftVersion);
+    if (!current) {
+      forgeByMinecraft.set(version.minecraftVersion, version);
+      continue;
+    }
+
+    const compare = compareNumericSegments(version.loaderVersion, current.loaderVersion);
+    if (compare > 0) {
+      forgeByMinecraft.set(version.minecraftVersion, version);
+    }
+  }
+
   for (const version of Array.isArray(optiFineVersions) ? optiFineVersions : []) {
     const current = optiFineByMinecraft.get(version.minecraftVersion);
     if (!current) {
@@ -3920,7 +4199,7 @@ function buildForgeOptiFineCatalog(forgeVersions, optiFineVersions) {
     }
   }
 
-  return (Array.isArray(forgeVersions) ? forgeVersions : [])
+  return Array.from(forgeByMinecraft.values())
     .map((forgeVersion) => {
       const optiFineVersion = optiFineByMinecraft.get(forgeVersion.minecraftVersion);
       if (!optiFineVersion) return null;
@@ -4407,7 +4686,10 @@ function needsOptiFineRepair(version, versionJson) {
   const hasAsmSupport = libraries.some((name) => name.startsWith("org.ow2.asm:"));
   const hasAnySupportedLaunchwrapper = hasLaunchwrapperOf || hasLaunchwrapper2 || hasLegacyLaunchwrapper;
   const requiresCustomLaunchwrapper = isModernMinecraftVersion(version.minecraftVersion);
-  const hasTweaker = hasOptiFineTweakerArgument(versionJson);
+  const hasTweaker = hasOptiFineTweakerArgument(
+    versionJson,
+    expectedOptiFineTweaker(version.loaderType)
+  );
 
   if (!hasOptiFineLibrary || !hasAnySupportedLaunchwrapper) return true;
   if (!hasTweaker) return true;
@@ -4457,7 +4739,7 @@ async function installRemoteOptiFineVersion(version) {
   }
 
   const libraries = installOptiFineArtifacts(version, installerPath, javaPath);
-  const optiFineTweaker = "optifine.OptiFineTweaker";
+  const optiFineTweaker = OPTIFINE_TWEAKER;
   const installedVersionJson = {
     id: version.id,
     type: "optifine",
@@ -4542,7 +4824,7 @@ async function installRemoteForgeOptiFineVersion(version) {
     installerPath,
     javaPath
   );
-  const optiFineTweaker = "optifine.OptiFineTweaker";
+  const optiFineTweaker = OPTIFINE_FORGE_TWEAKER;
 
   combinedLaunchJson = {
     ...combinedLaunchJson,
@@ -4561,15 +4843,11 @@ async function installRemoteForgeOptiFineVersion(version) {
     ]),
     arguments: {
       ...(combinedLaunchJson.arguments || {}),
-      game: appendStructuredTweakClassArgument(
-        combinedLaunchJson.arguments?.game,
-        optiFineTweaker
-      ),
+      game: combinedLaunchJson.arguments?.game,
     },
-    minecraftArguments: hasLegacyGameArguments(combinedLaunchJson)
-      ? appendTweakClassArgument(combinedLaunchJson.minecraftArguments, optiFineTweaker)
-      : combinedLaunchJson.minecraftArguments,
+    minecraftArguments: combinedLaunchJson.minecraftArguments,
   };
+  combinedLaunchJson = normalizeInstalledOptiFineTweaker(combinedLaunchJson, "forgeoptifine").versionJson;
   delete combinedLaunchJson.inheritsFrom;
   delete combinedLaunchJson.jar;
 
@@ -4688,6 +4966,48 @@ function modernForgeClientJar(versionJson) {
 
 function preferredMinecraftJar(versionJson, fallbackJarPath) {
   return modernForgeClientJar(versionJson) || fallbackJarPath || null;
+}
+
+function optiFineLibraryPath(versionJson) {
+  const libraries = Array.isArray(versionJson?.libraries) ? versionJson.libraries : [];
+  const optiFineLibrary = libraries.find((library) =>
+    String(library?.name || "").startsWith("optifine:OptiFine:")
+  );
+  return optiFineLibrary ? libraryArtifactPath(optiFineLibrary) : null;
+}
+
+function resolveLaunchTargets(version, versionJson, id, fallbackJarPath) {
+  const classes = resolveLaunchClassPaths(versionJson, id);
+  const minecraftJar = preferredMinecraftJar(versionJson, fallbackJarPath);
+  const loaderType = inferVersionLoaderType(version, versionJson);
+
+  if (loaderType !== "forgeoptifine") {
+    return { classes, minecraftJar };
+  }
+
+  const optiFineJar = optiFineLibraryPath(versionJson);
+  if (!optiFineJar || !fs.existsSync(optiFineJar) || !minecraftJar || !fs.existsSync(minecraftJar)) {
+    return { classes, minecraftJar };
+  }
+
+  const normalizePathKey = (filePath) => String(filePath || "").trim().toLowerCase();
+  const filteredClasses = classes.filter(
+    (filePath) => normalizePathKey(filePath) !== normalizePathKey(optiFineJar)
+  );
+
+  if (!filteredClasses.some((filePath) => normalizePathKey(filePath) === normalizePathKey(minecraftJar))) {
+    filteredClasses.push(minecraftJar);
+  }
+
+  sendEvent(
+    "debug",
+    `Classpath Forge+OptiFine ajustado: cliente base ${path.basename(minecraftJar)} carregado antes de ${path.basename(optiFineJar)}.`
+  );
+
+  return {
+    classes: filteredClasses,
+    minecraftJar: optiFineJar,
+  };
 }
 
 function currentMinecraftOs() {
@@ -5292,7 +5612,19 @@ async function ensureVersionFiles(version) {
       throw new Error(`Versao local ${version.id} sem JSON valido.`);
     }
 
-    const normalizedLocalJson = normalizeVersionShape(cloneJson(localJson));
+    let normalizedLocalJson = normalizeVersionShape(cloneJson(localJson));
+    const localLoaderType = String(localJson.loaderType || localJson.type || version.loaderType || "").toLowerCase();
+    if (localLoaderType === "optifine" || localLoaderType === "forgeoptifine") {
+      const repairedProfile = normalizeInstalledOptiFineTweaker(normalizedLocalJson, localLoaderType);
+      normalizedLocalJson = repairedProfile.versionJson;
+      if (repairedProfile.changed) {
+        writeJson(getLocalVersionJsonPath(version.id), normalizedLocalJson);
+        sendEvent(
+          "debug",
+          `Perfil ${version.id} ajustado automaticamente para ${expectedOptiFineTweaker(localLoaderType)}.`
+        );
+      }
+    }
     const explicitBaseId = localJson.inheritsFrom || localJson.jar || null;
     const selfContainedLocalVersion = isSelfContainedLocalVersion(
       normalizedLocalJson,
@@ -5323,6 +5655,12 @@ async function ensureVersionFiles(version) {
       ensureLocalForgeLibraries(version.id, launchJson);
       await ensureLocalLaunchLibraries(version.id, launchJson);
       const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
+      const launchTargets = resolveLaunchTargets(
+        version,
+        launchJson,
+        version.id,
+        localJarPath || getLocalVersionJarPath(baseMeta.id)
+      );
 
       return {
         ...version,
@@ -5332,11 +5670,8 @@ async function ensureVersionFiles(version) {
         inheritsFrom: baseMeta.id,
         javaVersion: launchJson.javaVersion || baseJson.javaVersion || null,
         launchJsonPath: launchJsonFile,
-        minecraftJar: preferredMinecraftJar(
-          launchJson,
-          localJarPath || getLocalVersionJarPath(baseMeta.id)
-        ),
-        classes: resolveLaunchClassPaths(launchJson, version.id),
+        minecraftJar: launchTargets.minecraftJar,
+        classes: launchTargets.classes,
         gameDirectory,
         extraJvmArgs: extractJvmArgs(
           normalizedLocalJson,
@@ -5353,6 +5688,12 @@ async function ensureVersionFiles(version) {
       if (!localJarPath) {
         await ensureClientJar({ ...version, id: version.id }, launchJson);
       }
+      const launchTargets = resolveLaunchTargets(
+        version,
+        launchJson,
+        version.id,
+        findLocalVersionJar(version.id) || getLocalVersionJarPath(version.id)
+      );
       return {
         ...version,
         type: localJson.type || version.type || "local",
@@ -5360,11 +5701,8 @@ async function ensureVersionFiles(version) {
         custom: null,
         javaVersion: launchJson.javaVersion || null,
         launchJsonPath: launchJsonFile,
-        minecraftJar: preferredMinecraftJar(
-          launchJson,
-          findLocalVersionJar(version.id) || getLocalVersionJarPath(version.id)
-        ),
-        classes: resolveLaunchClassPaths(launchJson, version.id),
+        minecraftJar: launchTargets.minecraftJar,
+        classes: launchTargets.classes,
         gameDirectory,
         extraJvmArgs: extractJvmArgs(launchJson, version.id),
       };
@@ -5375,6 +5713,12 @@ async function ensureVersionFiles(version) {
       ensureLocalForgeLibraries(version.id, launchJson);
       await ensureLocalLaunchLibraries(version.id, launchJson);
       const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
+      const launchTargets = resolveLaunchTargets(
+        version,
+        launchJson,
+        version.id,
+        localJarPath
+      );
       return {
         ...version,
         type: localJson.type || version.type || "local",
@@ -5382,8 +5726,8 @@ async function ensureVersionFiles(version) {
         custom: null,
         javaVersion: launchJson.javaVersion || null,
         launchJsonPath: launchJsonFile,
-        minecraftJar: preferredMinecraftJar(launchJson, localJarPath),
-        classes: resolveLaunchClassPaths(launchJson, version.id),
+        minecraftJar: launchTargets.minecraftJar,
+        classes: launchTargets.classes,
         gameDirectory,
         extraJvmArgs: extractJvmArgs(launchJson, version.id),
       };
@@ -5420,6 +5764,13 @@ function launcherOptions(version, authorization, settings, resolvedJavaPath) {
     ...resolvedAuthorization.meta,
     clientId: resolvedAuthorization.meta?.clientId || "00000000402b5328",
   };
+  const launchwrapperResolutionWorkaround = versionNeedsLaunchwrapperResolutionWorkaround(
+    version
+  );
+  const customLaunchArgs = stripLaunchArgumentPairs(
+    [...(version.extraGameArgs || [])],
+    ["--width", "--height", "--fullscreen"]
+  );
 
   return {
     clientPackage: null,
@@ -5445,11 +5796,14 @@ function launcherOptions(version, authorization, settings, resolvedJavaPath) {
       "-Dsun.net.client.defaultReadTimeout=20000",
       ...(version.extraJvmArgs || []),
     ],
-    window: {
-      width: clampNumber(settings.windowWidth, 854, 3840, 1280),
-      height: clampNumber(settings.windowHeight, 480, 2160, 720),
-      fullscreen: false,
-    },
+    customLaunchArgs,
+    window: launchwrapperResolutionWorkaround
+      ? undefined
+      : {
+          width: clampNumber(settings.windowWidth, 854, 3840, 1280),
+          height: clampNumber(settings.windowHeight, 480, 2160, 720),
+          fullscreen: false,
+        },
     overrides: {
       detached: false,
       maxSockets: 8,
@@ -5466,6 +5820,40 @@ function launcherOptions(version, authorization, settings, resolvedJavaPath) {
     cache: userDataPath("cache"),
     timeout: 120000,
   };
+}
+
+function stripLaunchArgumentPairs(args, optionNames) {
+  const blocked = new Set((optionNames || []).map((item) => String(item || "").trim()));
+  const output = [];
+
+  for (let index = 0; index < (args || []).length; index += 1) {
+    const value = String(args[index] || "").trim();
+    if (!value) continue;
+    if (blocked.has(value)) {
+      index += 1;
+      continue;
+    }
+    output.push(args[index]);
+  }
+
+  return output;
+}
+
+function versionNeedsLaunchwrapperResolutionWorkaround(version) {
+  const loaderType = String(version?.loaderType || version?.type || "").toLowerCase();
+  if (["forge", "optifine", "forgeoptifine"].includes(loaderType)) {
+    return true;
+  }
+
+  try {
+    const launchJsonFile = version?.launchJsonPath;
+    if (!launchJsonFile || !fs.existsSync(launchJsonFile)) return false;
+    const launchJson = readJson(launchJsonFile, null);
+    const mainClass = String(launchJson?.mainClass || "");
+    return mainClass.includes("net.minecraft.launchwrapper.Launch");
+  } catch (_error) {
+    return false;
+  }
 }
 
 function readableStage(type) {
@@ -5591,6 +5979,19 @@ async function runMinecraft(mode, input) {
       mode === "launch"
         ? await prepareLocalSkinRuntime(activeAccount, authorization, launchContext)
         : { authorization, extraJvmArgs: [] };
+    const lanSkinRuntime =
+      mode === "launch"
+        ? await prepareMicrosoftLanSkinRuntime(
+            activeAccount,
+            localSkinRuntime.authorization,
+            preparedVersion,
+            launchContext
+          )
+        : {
+            authorization: localSkinRuntime.authorization,
+            extraGameArgs: [],
+            extraJvmArgs: [],
+          };
     const resolvedJavaPath = await resolveJavaPathForVersion(preparedVersion, settings);
     const options = launcherOptions(
       {
@@ -5598,9 +5999,14 @@ async function runMinecraft(mode, input) {
         extraJvmArgs: [
           ...(preparedVersion.extraJvmArgs || []),
           ...(localSkinRuntime.extraJvmArgs || []),
+          ...(lanSkinRuntime.extraJvmArgs || []),
+        ],
+        extraGameArgs: [
+          ...(preparedVersion.extraGameArgs || []),
+          ...(lanSkinRuntime.extraGameArgs || []),
         ],
       },
-      localSkinRuntime.authorization,
+      lanSkinRuntime.authorization,
       settings,
       resolvedJavaPath
     );
