@@ -18,6 +18,7 @@ const state = {
   busy: false,
   activeTab: "versions",
   activeModpacksTab: "search",
+  activeCatalogKind: "modpacks",
   modpacksLoading: false,
   modpackQuery: "",
   modpackTotalHits: 0,
@@ -52,6 +53,55 @@ const state = {
   skinCatalogSearchTimer: null,
   skinCatalogError: "",
   skinApplyBusy: false,
+  modsCatalog: [],
+  modsCatalogLoading: false,
+  modsCatalogTotalHits: 0,
+  installingModId: null,
+  pendingModProject: null,
+  pendingModVersions: [],
+  pendingModTargetVersionId: "",
+  launchModsEntries: [],
+  launchModsRootPath: "",
+  launchModsUsingFallbackRoot: false,
+  launchModsLoading: false,
+  launchModsLoadedVersionId: null,
+  launchModsTruncated: false,
+  modsEntries: [],
+  modsRootPath: "",
+  modsUsingFallbackRoot: false,
+  modsTruncated: false,
+  modsLoading: false,
+  modsSaving: false,
+  modsLoadedVersionId: null,
+  modsSelectedPath: "",
+  modsSelectedEditable: false,
+  modsSelectedSize: 0,
+  modsSelectedModifiedAt: "",
+  modsFileContent: "",
+  modsOriginalContent: "",
+  modsStatusMessage: "",
+  modsListRequestId: 0,
+  modsFileRequestId: 0,
+  modpackEditorOpen: false,
+  addModModalOpen: false,
+  addModQuery: "",
+  addModResults: [],
+  addModLoading: false,
+  addModTotalHits: 0,
+  addModSearchTimer: null,
+  createModpackModalOpen: false,
+  createModpackLoading: false,
+  createModpackName: "",
+  createModpackTags: "",
+  createModpackMinecraftVersion: "",
+  createModpackLoader: "",
+  createModpackError: "",
+  createModpackStep: 1,
+  createModpackModsLoading: false,
+  createModpackModsQuery: "",
+  createModpackModsResults: [],
+  createModpackSelectedMods: [],
+  createModpackModsSearchTimer: null,
 };
 
 const elements = {
@@ -110,6 +160,7 @@ const elements = {
   versionFilter: document.querySelector("#version-filter"),
   refreshVersions: document.querySelector("#refresh-versions"),
   modpackSubtabs: document.querySelector("#modpack-subtabs"),
+  catalogModsTab: document.querySelector("#catalog-mods-tab"),
   modpacksSearchTab: document.querySelector("#modpacks-search-tab"),
   modpacksDownloadedTab: document.querySelector("#modpacks-downloaded-tab"),
   versionSearch: document.querySelector("#version-search"),
@@ -140,10 +191,54 @@ const elements = {
   modpackFilterBtn: document.querySelector("#modpack-filter-btn"),
   modpackFiltersPanel: document.querySelector("#modpack-filters"),
   modpackFilterVersion: document.querySelector("#modpack-filter-version"),
+  createModpackButton: document.querySelector("#create-modpack-button"),
   winMin: document.querySelector("#win-min"),
   winMax: document.querySelector("#win-max"),
   winClose: document.querySelector("#win-close"),
   btnShowLog: document.querySelector("#btn-show-log"),
+  modsEditorPanel: document.querySelector("#mods-editor-panel"),
+  openModpackEditor: document.querySelector("#open-modpack-editor"),
+  modpackEditorModal: document.querySelector("#modpack-editor-modal"),
+  closeModpackEditor: document.querySelector("#close-modpack-editor"),
+  launchModsPanel: document.querySelector("#launch-mods-panel"),
+  launchModsRootLabel: document.querySelector("#launch-mods-root-label"),
+  launchModsRefresh: document.querySelector("#launch-mods-refresh"),
+  launchModsList: document.querySelector("#launch-mods-list"),
+  modsRootLabel: document.querySelector("#mods-root-label"),
+  modsRefresh: document.querySelector("#mods-refresh"),
+  modsSave: document.querySelector("#mods-save"),
+  openAddModModal: document.querySelector("#open-add-mod-modal"),
+  modsFileList: document.querySelector("#mods-file-list"),
+  modsSelectedFile: document.querySelector("#mods-selected-file"),
+  modsFileStatus: document.querySelector("#mods-file-status"),
+  modsFileContent: document.querySelector("#mods-file-content"),
+  addModModal: document.querySelector("#add-mod-modal"),
+  closeAddModModal: document.querySelector("#close-add-mod-modal"),
+  cancelAddModModal: document.querySelector("#cancel-add-mod-modal"),
+  addModSearch: document.querySelector("#add-mod-search"),
+  addModResults: document.querySelector("#add-mod-results"),
+  createModpackModal: document.querySelector("#create-modpack-modal"),
+  closeCreateModpackModal: document.querySelector("#close-create-modpack-modal"),
+  cancelCreateModpack: document.querySelector("#cancel-create-modpack"),
+  backCreateModpackStep: document.querySelector("#back-create-modpack-step"),
+  confirmCreateModpack: document.querySelector("#confirm-create-modpack"),
+  createModpackSubtitle: document.querySelector("#create-modpack-subtitle"),
+  createModpackStepSetup: document.querySelector("#create-modpack-step-setup"),
+  createModpackStepMods: document.querySelector("#create-modpack-step-mods"),
+  createModpackName: document.querySelector("#create-modpack-name"),
+  createModpackTags: document.querySelector("#create-modpack-tags"),
+  createModpackVersion: document.querySelector("#create-modpack-version"),
+  createModpackLoader: document.querySelector("#create-modpack-loader"),
+  createModpackSummaryTitle: document.querySelector("#create-modpack-summary-title"),
+  createModpackSummaryMeta: document.querySelector("#create-modpack-summary-meta"),
+  createModpackModSearch: document.querySelector("#create-modpack-mod-search"),
+  createModpackSelectedCount: document.querySelector("#create-modpack-selected-count"),
+  clearCreateModpackMods: document.querySelector("#clear-create-modpack-mods"),
+  createModpackSelectedList: document.querySelector("#create-modpack-selected-list"),
+  createModpackModResults: document.querySelector("#create-modpack-mod-results"),
+  createModpackError: document.querySelector("#create-modpack-error"),
+  modpackTargetVersionRow: document.querySelector("#modpack-target-version-row"),
+  modpackTargetVersion: document.querySelector("#modpack-target-version"),
 };
 
 function formatDate(value) {
@@ -191,6 +286,18 @@ function setBusy(value) {
     elements.closeModpackVersionModal.disabled = value;
   }
 
+  if (elements.confirmCreateModpack) {
+    elements.confirmCreateModpack.disabled = value || state.createModpackLoading;
+  }
+
+  if (elements.closeCreateModpackModal) {
+    elements.closeCreateModpackModal.disabled = value || state.createModpackLoading;
+  }
+
+  if (elements.cancelCreateModpack) {
+    elements.cancelCreateModpack.disabled = value || state.createModpackLoading;
+  }
+
   syncActionButtons();
 
   if (
@@ -218,6 +325,8 @@ function clearSelectedVersion() {
   state.selected = null;
   renderSelected();
   renderCatalog();
+  syncModsEditorForSelection();
+  syncLaunchModsForSelection();
 }
 
 let _playPanelLeaveTimer = null;
@@ -330,17 +439,75 @@ function modpackLoaderLabel(loaderType) {
 
 function closeModpackVersionModal() {
   state.pendingModpack = null;
+  state.pendingModProject = null;
+  state.pendingModTargetVersionId = "";
   state.modpackVersions = [];
+  state.pendingModVersions = [];
   elements.modpackVersionModal.classList.add("hidden");
   elements.modpackVersionModal.setAttribute("aria-hidden", "true");
   elements.modpackVersionList.innerHTML = "";
+  if (elements.modpackTargetVersionRow) {
+    elements.modpackTargetVersionRow.classList.add("hidden");
+  }
+  if (elements.modpackTargetVersion) {
+    elements.modpackTargetVersion.innerHTML = "";
+  }
 }
 
 function openModpackVersionModal(modpack, versions) {
   state.pendingModpack = modpack;
+  state.pendingModProject = null;
   state.modpackVersions = Array.isArray(versions) ? versions : [];
   elements.modpackVersionTitle.textContent = `Escolher versao de ${modpack.title}`;
   elements.modpackVersionSubtitle.textContent = "Selecione qual versao voce quer baixar.";
+  if (elements.modpackTargetVersionRow) {
+    elements.modpackTargetVersionRow.classList.add("hidden");
+  }
+  elements.modpackVersionModal.classList.remove("hidden");
+  elements.modpackVersionModal.setAttribute("aria-hidden", "false");
+  renderModpackVersionOptions();
+  requestAnimationFrame(() => {
+    const firstButton = elements.modpackVersionList.querySelector("button");
+    if (firstButton) firstButton.focus();
+  });
+}
+
+function installedVersionsForMods() {
+  return state.versions
+    .filter((version) => version?.installed || version?.local)
+    .filter((version) => !version?.projectId)
+    .sort(compareVersions);
+}
+
+function openModVersionModal(modProject, versions, options = {}) {
+  state.pendingModProject = modProject;
+  state.pendingModpack = null;
+  state.pendingModTargetVersionId = String(options.targetVersionId || "").trim();
+  state.pendingModVersions = Array.isArray(versions) ? versions : [];
+  elements.modpackVersionTitle.textContent = `Escolher versao de ${modProject.title}`;
+  elements.modpackVersionSubtitle.textContent = state.pendingModTargetVersionId
+    ? "Selecione a versao do mod para adicionar ao modpack atual."
+    : "Selecione a versao do mod e em qual instalacao ele sera colocado.";
+
+  if (elements.modpackTargetVersionRow && elements.modpackTargetVersion) {
+    const options = installedVersionsForMods();
+    elements.modpackTargetVersion.innerHTML = "";
+
+    options.forEach((version) => {
+      const option = document.createElement("option");
+      option.value = version.id;
+      option.textContent = versionDisplayName(version);
+      elements.modpackTargetVersion.appendChild(option);
+    });
+
+    if (state.pendingModTargetVersionId) {
+      elements.modpackTargetVersion.value = state.pendingModTargetVersionId;
+      elements.modpackTargetVersionRow.classList.add("hidden");
+    } else {
+      elements.modpackTargetVersionRow.classList.toggle("hidden", !options.length);
+    }
+  }
+
   elements.modpackVersionModal.classList.remove("hidden");
   elements.modpackVersionModal.setAttribute("aria-hidden", "false");
   renderModpackVersionOptions();
@@ -354,7 +521,10 @@ function renderModpackVersionOptions() {
   elements.modpackVersionList.innerHTML = "";
 
   const fragment = document.createDocumentFragment();
-  state.modpackVersions.forEach((version) => {
+  const isModSelection = Boolean(state.pendingModProject);
+  const versions = isModSelection ? state.pendingModVersions : state.modpackVersions;
+
+  versions.forEach((version) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "modpack-version-item";
@@ -362,9 +532,25 @@ function renderModpackVersionOptions() {
     button.innerHTML = `
       <span class="modpack-version-copy">
         <strong>${escapeHtml(version.name || version.versionNumber || version.id)}</strong>
+        <small>${escapeHtml(
+          isModSelection
+            ? [
+                Array.isArray(version.minecraftVersions) ? version.minecraftVersions.join(", ") : "",
+                Array.isArray(version.loaders) ? version.loaders.join(", ") : "",
+              ]
+                .filter(Boolean)
+                .join(" • ")
+            : [version.minecraftVersion, modpackLoaderLabel(version.loaderType)].filter(Boolean).join(" • ")
+        )}</small>
       </span>
     `;
-    button.addEventListener("click", () => installModpackVersion(state.pendingModpack, version.id));
+    button.addEventListener("click", () => {
+      if (isModSelection) {
+        installSelectedModVersion(version.id);
+        return;
+      }
+      installModpackVersion(state.pendingModpack, version.id);
+    });
     fragment.appendChild(button);
   });
 
@@ -989,6 +1175,10 @@ function versionDisplayName(version) {
   const loaderType = String(version?.loaderType || version?.type || "").toLowerCase();
   const minecraftVersion = version?.minecraftVersion || version?.inheritsFrom || "";
 
+  if (isDownloadedModpack(version) && version?.modpackTitle) {
+    return String(version.modpackTitle).trim() || version?.id || "-";
+  }
+
   if (isForgeOptiFineVersion(version)) {
     return `ForgeOptifine ${minecraftVersion || version.id || ""}`.trim();
   }
@@ -1009,17 +1199,23 @@ function versionDisplayName(version) {
 }
 
 function isDownloadedModpack(version) {
-  return Boolean(version && (version.type === "modpack" || version.modpackProjectId || version.modpackTitle));
+  if (!version || !(version.installed || version.local)) return false;
+
+  return Boolean(
+    version.type === "modpack" ||
+      (version.modpackProjectId && version.modpackTitle && version.modpackVersionNumber)
+  );
 }
 
 function downloadedModpacks() {
   const query = elements.versionSearch ? elements.versionSearch.value.trim().toLowerCase() : "";
   return state.versions
     .filter((version) => isDownloadedModpack(version) && (version.installed || version.local))
-    .filter((version) => 
-        !query || 
-        version.id.toLowerCase().includes(query) || 
-        String(version.modpackTitle || "").toLowerCase().includes(query)
+  .filter((version) => 
+    !query || 
+    version.id.toLowerCase().includes(query) || 
+    String(version.modpackTitle || "").toLowerCase().includes(query) ||
+    (Array.isArray(version.modpackTags) && version.modpackTags.some((tag) => String(tag || "").toLowerCase().includes(query)))
     )
     .sort(compareVersions);
 }
@@ -1058,7 +1254,103 @@ function versionDescription(version) {
   if (version.modpackTitle && version.id && version.modpackTitle !== version.id) {
     parts.push(version.id);
   }
+  if (Array.isArray(version.modpackTags) && version.modpackTags.length) {
+    parts.push(`tags ${version.modpackTags.join(", ")}`);
+  }
   return parts.join(" - ");
+}
+
+function versionCompactDetails(version) {
+  const minecraftVersion = String(version?.minecraftVersion || version?.inheritsFrom || "").trim();
+  const loaderType = String(version?.loaderType || version?.type || "").trim().toLowerCase();
+  const parts = [];
+
+  if (minecraftVersion) {
+    parts.push(`MC ${minecraftVersion}`);
+  }
+
+  if (["fabric", "forge", "neoforge", "optifine", "forgeoptifine"].includes(loaderType)) {
+    parts.push(loaderDisplayName(loaderType));
+  }
+
+  return parts.join(" • ");
+}
+
+function modpackCategoryLabel(tag) {
+  const normalized = String(tag || "").trim().toLowerCase();
+  const labels = {
+    action: "Ação",
+    combat: "Combate",
+    adventure: "Aventura",
+    fantasy: "Fantasia",
+    magic: "Magia",
+    rpg: "RPG",
+    tech: "Tech",
+    technology: "Tecnologia",
+    exploration: "Exploração",
+    quests: "Quests",
+    questing: "Quests",
+    optimization: "Otimização",
+    vanilla: "Vanilla",
+    "vanilla-like": "Vanilla+",
+    "vanilla+": "Vanilla+",
+    hardcore: "Hardcore",
+    multiplayer: "Multiplayer",
+    economy: "Economia",
+    decoration: "Decoração",
+    building: "Construção",
+    automation: "Automação",
+    scifi: "Sci-Fi",
+    "sci-fi": "Sci-Fi",
+    horror: "Terror",
+    "kitchen-sink": "Kitchen Sink",
+    minigames: "Minigames",
+    survival: "Sobrevivência",
+    skyblock: "Skyblock",
+    pvp: "PvP",
+  };
+
+  if (labels[normalized]) return labels[normalized];
+  return normalized
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function modpackGenreTags(categories, limit = 5) {
+  const ignored = new Set(["fabric", "forge", "neoforge", "quilt", "mrpack"]);
+  const normalized = Array.isArray(categories)
+    ? [...new Set(categories.map((tag) => String(tag || "").trim().toLowerCase()).filter(Boolean))]
+    : [];
+
+  return normalized
+    .filter((tag) => !ignored.has(tag))
+    .slice(0, limit)
+    .map(modpackCategoryLabel);
+}
+
+function renderTagRow(tags, className = "tag-row") {
+  const normalizedTags = Array.isArray(tags)
+    ? [...new Set(tags.map((tag) => String(tag || "").trim()).filter(Boolean))]
+    : [];
+
+  if (!normalizedTags.length) return "";
+
+  return `
+    <span class="${className}">
+      ${normalizedTags.map((tag) => `<span class="tag custom">${escapeHtml(tag)}</span>`).join("")}
+    </span>
+  `;
+}
+
+function parseCreateModpackTags(value) {
+  return [...new Set(
+    String(value || "")
+      .split(/[,;]+/)
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+  )];
 }
 
 function escapeHtml(value) {
@@ -1068,6 +1360,1261 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function modsEditorVisible() {
+  return (
+    Boolean(state.selected?.id) &&
+    (
+      (
+        state.activeTab === "modpacks" &&
+        state.activeModpacksTab === "downloaded" &&
+        isDownloadedModpack(state.selected)
+      ) ||
+      (
+        state.activeTab === "versions" &&
+        Boolean(state.selected?.installed || state.selected?.local)
+      )
+    ) &&
+    Boolean(state.selected?.id)
+  );
+}
+
+function selectedModpackToggleableEntry() {
+  return state.modsEntries.find((entry) => entry.relativePath === state.modsSelectedPath) || null;
+}
+
+function isToggleableModpackEntry(entry) {
+  if (!entry) return false;
+  return /\.jar(?:\.desactived)?$/i.test(String(entry.name || entry.relativePath || ""));
+}
+
+function isActiveModpackEntry(entry) {
+  if (!isToggleableModpackEntry(entry)) return false;
+  return !String(entry.name || entry.relativePath || "").toLowerCase().endsWith(".desactived");
+}
+
+function closeAddModSearchTimer() {
+  if (state.addModSearchTimer) {
+    clearTimeout(state.addModSearchTimer);
+    state.addModSearchTimer = null;
+  }
+}
+
+function availableCreateModpackVersions() {
+  const versions = new Set();
+
+  state.versions.forEach((version) => {
+    const versionId = String(version?.id || "").trim();
+    if (!versionId) return;
+    if (version?.type !== "release" || !version?.url) return;
+
+    const hasSupportedLoader = ["neoforge", "fabric", "forge"].some((loaderType) =>
+      state.versions.some(
+        (candidate) =>
+          Boolean(candidate?.remoteLoader) &&
+          String(candidate?.minecraftVersion || "").trim() === versionId &&
+          String(candidate?.loaderType || "").trim().toLowerCase() === loaderType
+      )
+    );
+
+    if (hasSupportedLoader) {
+      versions.add(versionId);
+    }
+  });
+
+  return Array.from(versions).sort((left, right) => {
+    const leftParts = parseNumericVersionParts(left);
+    const rightParts = parseNumericVersionParts(right);
+
+    if (leftParts && rightParts) {
+      return -compareVersionParts(leftParts, rightParts);
+    }
+    if (leftParts || rightParts) {
+      return leftParts ? -1 : 1;
+    }
+
+    return String(right).localeCompare(String(left), undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+  });
+}
+
+function availableCreateModpackLoaders(minecraftVersion = state.createModpackMinecraftVersion) {
+  const normalizedVersion = String(minecraftVersion || "").trim();
+  const loaders = new Set();
+
+  state.versions.forEach((version) => {
+    if (String(version?.minecraftVersion || "").trim() !== normalizedVersion) return;
+    const loaderType = String(version?.loaderType || "").trim().toLowerCase();
+    if (Boolean(version?.remoteLoader) && ["neoforge", "fabric", "forge"].includes(loaderType)) {
+      loaders.add(loaderType);
+    }
+  });
+
+  return ["neoforge", "fabric", "forge"].filter((loaderType) => loaders.has(loaderType));
+}
+
+function createModpackSelectionFilters() {
+  return {
+    gameVersion: String(state.createModpackMinecraftVersion || "").trim(),
+    loader: String(state.createModpackLoader || "").trim().toLowerCase(),
+  };
+}
+
+function closeCreateModpackModsSearchTimer() {
+  if (state.createModpackModsSearchTimer) {
+    clearTimeout(state.createModpackModsSearchTimer);
+    state.createModpackModsSearchTimer = null;
+  }
+}
+
+function isCreateModSelected(projectId) {
+  return state.createModpackSelectedMods.some((mod) => mod.projectId === projectId);
+}
+
+function toggleCreateModSelection(mod) {
+  if (!mod?.projectId) return;
+
+  if (isCreateModSelected(mod.projectId)) {
+    state.createModpackSelectedMods = state.createModpackSelectedMods.filter(
+      (entry) => entry.projectId !== mod.projectId
+    );
+  } else {
+    state.createModpackSelectedMods = [
+      ...state.createModpackSelectedMods,
+      {
+        projectId: mod.projectId,
+        title: mod.title || mod.projectId,
+        description: mod.description || "",
+        iconUrl: mod.iconUrl || "",
+      },
+    ];
+  }
+
+  renderCreateModpackModal();
+}
+
+function removeCreateModSelection(projectId) {
+  if (!projectId) return;
+  state.createModpackSelectedMods = state.createModpackSelectedMods.filter((entry) => entry.projectId !== projectId);
+  renderCreateModpackModal();
+}
+
+async function searchModsForCreateModpack(query = state.createModpackModsQuery) {
+  if (!state.createModpackModalOpen || state.createModpackStep !== 2) return;
+
+  state.createModpackModsLoading = true;
+  state.createModpackModsQuery = String(query || "").trim();
+  renderCreateModpackModal();
+
+  try {
+    const result = await api.searchMods(state.createModpackModsQuery, createModpackSelectionFilters());
+    state.createModpackModsResults = result.hits || [];
+  } catch (error) {
+    state.createModpackModsResults = [];
+    state.createModpackError = error.message || String(error);
+    appendLog("error", state.createModpackError);
+  } finally {
+    state.createModpackModsLoading = false;
+    renderCreateModpackModal();
+  }
+}
+
+function queueCreateModpackModsSearch() {
+  closeCreateModpackModsSearchTimer();
+  state.createModpackModsSearchTimer = setTimeout(() => {
+    searchModsForCreateModpack(state.createModpackModsQuery);
+  }, 320);
+}
+
+async function goToCreateModpackModsStep() {
+  if (!state.createModpackName.trim() || !state.createModpackMinecraftVersion || !state.createModpackLoader) {
+    state.createModpackError = "Preencha o nome, a versao e o loader do modpack.";
+    renderCreateModpackModal();
+    return;
+  }
+
+  state.createModpackStep = 2;
+  state.createModpackError = "";
+  state.createModpackModsResults = [];
+  renderCreateModpackModal();
+  await searchModsForCreateModpack("");
+}
+
+function ensureCreateModpackSelections() {
+  const versions = availableCreateModpackVersions();
+  if (!versions.length) {
+    state.createModpackMinecraftVersion = "";
+    state.createModpackLoader = "";
+    return;
+  }
+
+  if (!versions.includes(state.createModpackMinecraftVersion)) {
+    state.createModpackMinecraftVersion = versions[0];
+  }
+
+  const loaders = availableCreateModpackLoaders(state.createModpackMinecraftVersion);
+  if (!loaders.includes(state.createModpackLoader)) {
+    state.createModpackLoader = loaders[0] || "";
+  }
+}
+
+function resetCreateModpackModalState() {
+  state.createModpackModalOpen = false;
+  state.createModpackLoading = false;
+  state.createModpackName = "";
+  state.createModpackTags = "";
+  state.createModpackMinecraftVersion = "";
+  state.createModpackLoader = "";
+  state.createModpackError = "";
+  state.createModpackStep = 1;
+  state.createModpackModsLoading = false;
+  state.createModpackModsQuery = "";
+  state.createModpackModsResults = [];
+  state.createModpackSelectedMods = [];
+  closeCreateModpackModsSearchTimer();
+}
+
+function renderCreateModpackModal() {
+  if (!elements.createModpackModal) return;
+
+  ensureCreateModpackSelections();
+
+  const visible = state.createModpackModalOpen;
+  elements.createModpackModal.classList.toggle("hidden", !visible);
+  elements.createModpackModal.setAttribute("aria-hidden", visible ? "false" : "true");
+
+  if (!visible) return;
+
+  const versions = availableCreateModpackVersions();
+  const loaders = availableCreateModpackLoaders();
+  const stepTwoVisible = state.createModpackStep === 2;
+
+  if (elements.createModpackStepSetup) {
+    elements.createModpackStepSetup.classList.toggle("hidden", stepTwoVisible);
+  }
+  if (elements.createModpackStepMods) {
+    elements.createModpackStepMods.classList.toggle("hidden", !stepTwoVisible);
+  }
+
+  if (
+    elements.createModpackName &&
+    document.activeElement !== elements.createModpackName &&
+    elements.createModpackName.value !== state.createModpackName
+  ) {
+    elements.createModpackName.value = state.createModpackName;
+  }
+
+  if (
+    elements.createModpackTags &&
+    document.activeElement !== elements.createModpackTags &&
+    elements.createModpackTags.value !== state.createModpackTags
+  ) {
+    elements.createModpackTags.value = state.createModpackTags;
+  }
+
+  if (elements.createModpackVersion) {
+    elements.createModpackVersion.innerHTML = versions.length
+      ? versions
+          .map((version) => `<option value="${escapeHtml(version)}">${escapeHtml(version)}</option>`)
+          .join("")
+      : '<option value="">Nenhuma versao disponivel</option>';
+    elements.createModpackVersion.value = state.createModpackMinecraftVersion || versions[0] || "";
+    elements.createModpackVersion.disabled = state.createModpackLoading || !versions.length;
+  }
+
+  if (elements.createModpackLoader) {
+    elements.createModpackLoader.innerHTML = loaders.length
+      ? loaders
+          .map(
+            (loaderType) =>
+              `<option value="${escapeHtml(loaderType)}">${escapeHtml(loaderDisplayName(loaderType))}</option>`
+          )
+          .join("")
+      : '<option value="">Nenhum loader disponivel</option>';
+    elements.createModpackLoader.value = state.createModpackLoader || loaders[0] || "";
+    elements.createModpackLoader.disabled = state.createModpackLoading || !loaders.length;
+  }
+
+  if (elements.createModpackSubtitle) {
+    elements.createModpackSubtitle.textContent = stepTwoVisible
+      ? "Selecione os mods compativeis que serao baixados automaticamente apos criar a versao."
+      : "Escolha o nome, a versao do Minecraft e o loader antes de selecionar os mods.";
+  }
+
+  if (elements.backCreateModpackStep) {
+    elements.backCreateModpackStep.classList.toggle("hidden", !stepTwoVisible);
+    elements.backCreateModpackStep.disabled = state.createModpackLoading || state.createModpackModsLoading;
+  }
+
+  if (elements.createModpackSummaryTitle) {
+    elements.createModpackSummaryTitle.textContent = state.createModpackName.trim() || "Novo modpack";
+  }
+
+  if (elements.createModpackSummaryMeta) {
+    elements.createModpackSummaryMeta.textContent = [
+      state.createModpackMinecraftVersion || "Sem versao",
+      state.createModpackLoader ? loaderDisplayName(state.createModpackLoader) : "Sem loader",
+      parseCreateModpackTags(state.createModpackTags).length
+        ? `Tags: ${parseCreateModpackTags(state.createModpackTags).join(", ")}`
+        : "",
+    ].join(" • ");
+  }
+
+  if (elements.createModpackModSearch && elements.createModpackModSearch.value !== state.createModpackModsQuery) {
+    elements.createModpackModSearch.value = state.createModpackModsQuery;
+  }
+
+  if (elements.createModpackSelectedCount) {
+    const total = state.createModpackSelectedMods.length;
+    elements.createModpackSelectedCount.textContent = `${total} mod${total === 1 ? "" : "s"} selecionado${total === 1 ? "" : "s"}`;
+  }
+
+  if (elements.clearCreateModpackMods) {
+    elements.clearCreateModpackMods.disabled =
+      state.createModpackLoading || state.createModpackModsLoading || !state.createModpackSelectedMods.length;
+  }
+
+  if (elements.createModpackSelectedList) {
+    elements.createModpackSelectedList.innerHTML = "";
+
+    if (!state.createModpackSelectedMods.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state mods-empty-state";
+      empty.textContent = "Os mods escolhidos aparecem aqui.";
+      elements.createModpackSelectedList.appendChild(empty);
+    } else {
+      const fragment = document.createDocumentFragment();
+      state.createModpackSelectedMods.forEach((mod) => {
+        const item = document.createElement("div");
+        item.className = "create-modpack-selected-item";
+        item.innerHTML = `
+          <div class="create-modpack-selected-copy">
+            <strong>${escapeHtml(mod.title || mod.projectId)}</strong>
+            <small>${escapeHtml(mod.description || mod.projectId || "")}</small>
+          </div>
+        `;
+
+        const removeButton = document.createElement("button");
+        removeButton.className = "ghost small-button";
+        removeButton.type = "button";
+        removeButton.textContent = "Remover";
+        removeButton.disabled = state.createModpackLoading;
+        removeButton.addEventListener("click", () => removeCreateModSelection(mod.projectId));
+
+        item.appendChild(removeButton);
+        fragment.appendChild(item);
+      });
+      elements.createModpackSelectedList.appendChild(fragment);
+    }
+  }
+
+  if (elements.createModpackModResults) {
+    elements.createModpackModResults.innerHTML = "";
+
+    if (state.createModpackModsLoading) {
+      const loading = document.createElement("div");
+      loading.className = "empty-state mods-empty-state";
+      loading.textContent = "Buscando mods compativeis...";
+      elements.createModpackModResults.appendChild(loading);
+    } else if (!state.createModpackModsResults.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state mods-empty-state";
+      empty.textContent = state.createModpackModsQuery
+        ? "Nenhum mod compativel encontrado"
+        : "Pesquise mods para incluir nesse modpack.";
+      elements.createModpackModResults.appendChild(empty);
+    } else {
+      const fragment = document.createDocumentFragment();
+      state.createModpackModsResults.forEach((mod) => {
+        const card = document.createElement("article");
+        card.className = "modpack-item";
+        if (isCreateModSelected(mod.projectId)) {
+          card.classList.add("selected");
+        }
+
+        const button = document.createElement("button");
+        button.className = isCreateModSelected(mod.projectId) ? "primary" : "secondary";
+        button.type = "button";
+        button.textContent = isCreateModSelected(mod.projectId) ? "Selecionado" : "Selecionar";
+        button.disabled = state.createModpackLoading;
+        button.addEventListener("click", () => toggleCreateModSelection(mod));
+
+        card.innerHTML = `
+          ${
+            mod.iconUrl
+              ? `<img class="modpack-icon" src="${escapeHtml(mod.iconUrl)}" alt="" />`
+              : '<div class="modpack-icon-placeholder">M</div>'
+          }
+          <div class="modpack-copy">
+            <strong>${escapeHtml(mod.title)}</strong>
+            <small>${escapeHtml(mod.description || "")}</small>
+          </div>
+          <div class="modpack-actions"></div>
+        `;
+
+        card.querySelector(".modpack-actions").appendChild(button);
+        fragment.appendChild(card);
+      });
+      elements.createModpackModResults.appendChild(fragment);
+    }
+  }
+
+  if (elements.createModpackError) {
+    elements.createModpackError.textContent = state.createModpackError || "";
+    elements.createModpackError.classList.toggle("hidden", !state.createModpackError);
+  }
+
+  if (elements.confirmCreateModpack) {
+    elements.confirmCreateModpack.textContent = state.createModpackLoading
+      ? "Criando..."
+      : stepTwoVisible
+        ? "Criar modpack"
+        : "Avancar";
+    elements.confirmCreateModpack.disabled =
+      state.createModpackLoading ||
+      (stepTwoVisible
+        ? false
+        : !state.createModpackName.trim() || !state.createModpackMinecraftVersion || !state.createModpackLoader);
+  }
+}
+
+function refreshCreateModpackNameState() {
+  if (elements.createModpackSummaryTitle) {
+    elements.createModpackSummaryTitle.textContent = state.createModpackName.trim() || "Novo modpack";
+  }
+
+  if (elements.createModpackSummaryMeta) {
+    elements.createModpackSummaryMeta.textContent = [
+      state.createModpackMinecraftVersion || "Sem versao",
+      state.createModpackLoader ? loaderDisplayName(state.createModpackLoader) : "Sem loader",
+      parseCreateModpackTags(state.createModpackTags).length
+        ? `Tags: ${parseCreateModpackTags(state.createModpackTags).join(", ")}`
+        : "",
+    ].filter(Boolean).join(" • ");
+  }
+
+  if (elements.createModpackError) {
+    elements.createModpackError.textContent = state.createModpackError || "";
+    elements.createModpackError.classList.toggle("hidden", !state.createModpackError);
+  }
+
+  if (elements.confirmCreateModpack) {
+    const stepTwoVisible = state.createModpackStep === 2;
+    const isSetupValid =
+      state.createModpackName.trim() &&
+      state.createModpackMinecraftVersion &&
+      state.createModpackLoader;
+
+    elements.confirmCreateModpack.disabled =
+      state.createModpackLoading || (stepTwoVisible ? false : !isSetupValid);
+
+    // Update button text based on step
+    elements.confirmCreateModpack.textContent = stepTwoVisible ? "Criar Modpack" : "Prosseguir";
+  }
+}
+
+function openCreateModpackModal() {
+  if (state.activeTab !== "modpacks" || state.activeModpacksTab !== "downloaded") return;
+
+  state.createModpackModalOpen = true;
+  state.createModpackLoading = false;
+  state.createModpackError = "";
+  state.createModpackStep = 1;
+  ensureCreateModpackSelections();
+  renderCreateModpackModal();
+
+  requestAnimationFrame(() => {
+    if (!elements.createModpackName || !state.createModpackModalOpen) return;
+    elements.createModpackName.focus();
+    if (!state.createModpackName) {
+      elements.createModpackName.select();
+    }
+  });
+}
+
+function closeCreateModpackModal(force = false) {
+  if (state.createModpackLoading && !force) return;
+  resetCreateModpackModalState();
+  renderCreateModpackModal();
+}
+
+function selectedModpackSearchFilters() {
+  const gameVersion = String(state.selected?.minecraftVersion || state.selected?.inheritsFrom || "").trim();
+  const loader = String(state.selected?.loaderType || "").trim().toLowerCase();
+
+  return {
+    gameVersion,
+    loader: ["fabric", "forge", "neoforge", "quilt"].includes(loader) ? loader : "",
+  };
+}
+
+async function createCustomModpackFromModal() {
+  if (state.createModpackLoading) return;
+
+  if (state.createModpackStep !== 2) {
+    await goToCreateModpackModsStep();
+    return;
+  }
+
+  const name = state.createModpackName.trim();
+  if (!name || !state.createModpackMinecraftVersion || !state.createModpackLoader) {
+    state.createModpackError = "Preencha o nome, a versao e o loader do modpack.";
+    renderCreateModpackModal();
+    return;
+  }
+
+  state.createModpackLoading = true;
+  state.createModpackError = "";
+  renderCreateModpackModal();
+  setBusy(true);
+
+  try {
+    const created = await api.createCustomModpack({
+      name,
+      tags: parseCreateModpackTags(state.createModpackTags),
+      minecraftVersion: state.createModpackMinecraftVersion,
+      loaderType: state.createModpackLoader,
+    });
+
+    const failedMods = [];
+    for (const mod of state.createModpackSelectedMods) {
+      try {
+        const versions = await api.getModVersions(mod.projectId);
+        const selectedVersion = Array.isArray(versions) ? versions[0] : null;
+        if (!selectedVersion?.id) {
+          throw new Error(`Nenhuma versao compativel encontrada para ${mod.title || mod.projectId}.`);
+        }
+
+        await api.installMod({
+          projectId: mod.projectId,
+          title: mod.title || mod.projectId,
+          versionId: selectedVersion.id,
+          targetVersionId: created.versionId,
+        });
+      } catch (error) {
+        failedMods.push({
+          title: mod.title || mod.projectId,
+          message: error.message || String(error),
+        });
+      }
+    }
+
+    const data = await api.refreshVersions();
+
+    state.versions = data.versions;
+    state.latest = data.latest;
+    state.activeTab = "modpacks";
+    state.activeCatalogKind = "modpacks";
+    state.activeModpacksTab = "downloaded";
+    state.selected = state.versions.find((version) => version.id === created.versionId) || null;
+    state.modpackQuery = "";
+    if (elements.versionSearch) {
+      elements.versionSearch.value = "";
+    }
+
+    closeAddModSearchTimer();
+    state.addModQuery = "";
+    state.addModResults = [];
+    state.addModTotalHits = 0;
+    state.modpackEditorOpen = false;
+    state.addModModalOpen = false;
+
+    closeCreateModpackModal(true);
+    renderSelected();
+    renderLatest();
+    renderCatalog();
+    syncModsEditorForSelection(true);
+    syncLaunchModsForSelection(true);
+
+    if (failedMods.length) {
+      appendLog(
+        "warning",
+        `${created.title} foi criado, mas ${failedMods.length} mod(s) falharam no download.`
+      );
+      failedMods.forEach((failure) => appendLog("warning", `${failure.title}: ${failure.message}`));
+    } else {
+      appendLog(
+        "success",
+        `${created.title} criado com sucesso${state.createModpackSelectedMods.length ? " com os mods selecionados" : ""}.`
+      );
+    }
+  } catch (error) {
+    state.createModpackError = error.message || String(error);
+    appendLog("error", state.createModpackError);
+    renderCreateModpackModal();
+  } finally {
+    state.createModpackLoading = false;
+    setBusy(false);
+    renderCreateModpackModal();
+    renderLatest();
+  }
+}
+
+function isModsFileDirty() {
+  return state.modsSelectedEditable && state.modsFileContent !== state.modsOriginalContent;
+}
+
+function resetModsFileSelection() {
+  state.modsSelectedPath = "";
+  state.modsSelectedEditable = false;
+  state.modsSelectedSize = 0;
+  state.modsSelectedModifiedAt = "";
+  state.modsFileContent = "";
+  state.modsOriginalContent = "";
+}
+
+function resetModsBrowser() {
+  state.modsEntries = [];
+  state.modsRootPath = "";
+  state.modsUsingFallbackRoot = false;
+  state.modsTruncated = false;
+  state.modsLoadedVersionId = null;
+  state.modsStatusMessage = "";
+  state.modsLoading = false;
+  state.modsSaving = false;
+  resetModsFileSelection();
+}
+
+function selectedModsEntry() {
+  return state.modsEntries.find((entry) => entry.relativePath === state.modsSelectedPath) || null;
+}
+
+function confirmDiscardModsChanges() {
+  if (!isModsFileDirty()) return true;
+  return window.confirm("Existem alteracoes nao salvas nesse arquivo. Deseja descartá-las?");
+}
+
+function renderModsEditor(forceTextareaSync = false) {
+  if (!elements.modsEditorPanel || !elements.modpackEditorModal) return;
+
+  const available = modsEditorVisible();
+  elements.modsEditorPanel.classList.toggle("hidden", !available);
+  elements.modpackEditorModal.classList.toggle("hidden", !available || !state.modpackEditorOpen);
+  elements.modpackEditorModal.setAttribute(
+    "aria-hidden",
+    !available || !state.modpackEditorOpen ? "true" : "false"
+  );
+
+  if (!available) {
+    return;
+  }
+
+  const selectedEntry = selectedModsEntry();
+  const dirty = isModsFileDirty();
+
+  if (elements.modsRootLabel) {
+    if (state.modsLoading) {
+      elements.modsRootLabel.textContent = "Carregando arquivos da pasta mods...";
+    } else if (state.modsRootPath) {
+      const suffix = state.modsUsingFallbackRoot ? " (usando mods da .minecraft)" : "";
+      elements.modsRootLabel.textContent = `${state.modsRootPath}${suffix}`;
+    } else {
+      elements.modsRootLabel.textContent = "Selecione um mod do modpack para editar ou desativar.";
+    }
+  }
+
+  if (elements.modsRefresh) {
+    elements.modsRefresh.disabled = state.busy || state.modsLoading || state.modsSaving;
+  }
+
+  if (elements.modsSave) {
+    elements.modsSave.disabled =
+      state.busy ||
+      state.modsLoading ||
+      state.modsSaving ||
+      !state.modsSelectedEditable ||
+      !dirty;
+    elements.modsSave.textContent = state.modsSaving ? "Salvando..." : "Salvar";
+  }
+
+  if (elements.openAddModModal) {
+    elements.openAddModModal.disabled = state.busy || state.modsLoading;
+  }
+
+  if (elements.modsFileList) {
+    elements.modsFileList.innerHTML = "";
+
+    if (state.modsLoading) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state mods-empty-state";
+      empty.textContent = "Carregando arquivos...";
+      elements.modsFileList.appendChild(empty);
+    } else if (!state.modsEntries.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state mods-empty-state";
+      empty.textContent = "Nenhum arquivo encontrado dentro da pasta mods.";
+      elements.modsFileList.appendChild(empty);
+    } else {
+      const fragment = document.createDocumentFragment();
+
+      state.modsEntries.forEach((entry) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mods-file-item";
+        if (entry.relativePath === state.modsSelectedPath) {
+          button.classList.add("selected");
+        }
+        if (!entry.editable) {
+          button.classList.add("readonly");
+        }
+
+        const meta = [];
+        meta.push(formatBytes(entry.size));
+        if (!entry.editable) meta.push("somente leitura");
+
+        button.innerHTML = `
+          <span class="mods-file-copy">
+            <strong>${escapeHtml(entry.name)}</strong>
+            <small>${escapeHtml(entry.relativePath)}</small>
+            <span>${escapeHtml(meta.join(" • "))}</span>
+          </span>
+        `;
+
+        button.addEventListener("click", () => {
+          openModsFileEntry(entry);
+        });
+
+        if (isToggleableModpackEntry(entry)) {
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = `mods-file-toggle ${isActiveModpackEntry(entry) ? "enabled" : "disabled"}`;
+          toggle.textContent = isActiveModpackEntry(entry) ? "Ativo" : "Desativado";
+          toggle.setAttribute("aria-label", isActiveModpackEntry(entry) ? "Mod ativo" : "Mod desativado");
+          toggle.setAttribute("aria-pressed", isActiveModpackEntry(entry) ? "true" : "false");
+          toggle.title = isActiveModpackEntry(entry) ? "Mod ativo" : "Mod desativado";
+          toggle.disabled = state.busy || state.modsLoading || state.modsSaving;
+          toggle.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleSelectedModpackMod(entry);
+          });
+          button.appendChild(toggle);
+        }
+
+        fragment.appendChild(button);
+      });
+
+      if (state.modsTruncated) {
+        const notice = document.createElement("div");
+        notice.className = "mods-list-notice";
+        notice.textContent = "Lista parcial: muitos arquivos dentro da pasta mods.";
+        fragment.appendChild(notice);
+      }
+
+      elements.modsFileList.appendChild(fragment);
+    }
+  }
+
+  if (elements.modsSelectedFile) {
+    elements.modsSelectedFile.textContent = state.modsSelectedPath || "Nenhum arquivo selecionado";
+  }
+
+  if (elements.modsFileStatus) {
+    if (!state.modsSelectedPath) {
+      elements.modsFileStatus.textContent = state.modsStatusMessage || "Escolha um arquivo de texto para editar.";
+    } else {
+      const details = [];
+      if (state.modsSelectedSize) details.push(formatBytes(state.modsSelectedSize));
+      if (state.modsSelectedModifiedAt) details.push(`Atualizado ${formatDate(state.modsSelectedModifiedAt)}`);
+      if (!state.modsSelectedEditable) {
+        details.push(state.modsStatusMessage || "Arquivo binario ou grande demais para edicao.");
+      } else if (dirty) {
+        details.push("Alteracoes nao salvas");
+      } else if (state.modsStatusMessage) {
+        details.push(state.modsStatusMessage);
+      } else {
+        details.push("Pronto para editar");
+      }
+      elements.modsFileStatus.textContent = details.join(" • ");
+    }
+  }
+
+  if (elements.modsFileContent) {
+    elements.modsFileContent.disabled =
+      state.busy || state.modsLoading || state.modsSaving || !state.modsSelectedEditable;
+    elements.modsFileContent.placeholder = state.modsSelectedEditable
+      ? "Edite o arquivo aqui e clique em Salvar."
+      : state.modsSelectedPath
+        ? "Esse arquivo nao pode ser editado pelo launcher."
+        : "Selecione um arquivo da lista para editar aqui.";
+
+    if (forceTextareaSync || elements.modsFileContent.value !== state.modsFileContent) {
+      elements.modsFileContent.value = state.modsFileContent;
+    }
+  }
+}
+
+async function loadModsFiles(forceReload = false) {
+  if (!modsEditorVisible()) {
+    resetModsBrowser();
+    renderModsEditor(true);
+    return;
+  }
+
+  if (!state.modpackEditorOpen) {
+    renderModsEditor(true);
+    return;
+  }
+
+  const versionId = state.selected.id;
+  if (!forceReload && state.modsLoadedVersionId === versionId && state.modsEntries.length) {
+    renderModsEditor();
+    return;
+  }
+
+  const requestId = ++state.modsListRequestId;
+  state.modsLoading = true;
+  state.modsStatusMessage = "";
+  if (forceReload || state.modsLoadedVersionId !== versionId) {
+    resetModsFileSelection();
+  }
+  renderModsEditor(true);
+
+  try {
+    const response = await api.listModFiles({ versionId });
+    if (requestId !== state.modsListRequestId) return;
+
+    state.modsEntries = Array.isArray(response?.entries) ? response.entries : [];
+    state.modsRootPath = response?.rootPath || "";
+    state.modsUsingFallbackRoot = Boolean(response?.usingFallbackRoot);
+    state.modsTruncated = Boolean(response?.truncated);
+    state.modsLoadedVersionId = versionId;
+
+    if (!state.modsEntries.some((entry) => entry.relativePath === state.modsSelectedPath)) {
+      resetModsFileSelection();
+    }
+  } catch (error) {
+    if (requestId !== state.modsListRequestId) return;
+    resetModsBrowser();
+    state.modsStatusMessage = error.message || String(error);
+    appendLog("error", error.message || String(error));
+  } finally {
+    if (requestId === state.modsListRequestId) {
+      state.modsLoading = false;
+      renderModsEditor(true);
+    }
+  }
+}
+
+async function openModsFileEntry(entry) {
+  if (!entry || !modsEditorVisible() || !state.modpackEditorOpen) return;
+  if (!confirmDiscardModsChanges()) return;
+
+  state.modsSelectedPath = entry.relativePath;
+  state.modsSelectedSize = entry.size || 0;
+  state.modsSelectedModifiedAt = entry.modifiedAt || "";
+  state.modsSelectedEditable = Boolean(entry.editable);
+  state.modsStatusMessage = entry.editable
+    ? "Carregando arquivo..."
+    : "Arquivo binario ou grande demais para edicao no launcher.";
+  state.modsFileContent = "";
+  state.modsOriginalContent = "";
+  renderModsEditor(true);
+
+  if (!entry.editable) {
+    return;
+  }
+
+  const requestId = ++state.modsFileRequestId;
+
+  try {
+    const response = await api.readModFile({
+      versionId: state.selected.id,
+      relativePath: entry.relativePath,
+    });
+
+    if (requestId !== state.modsFileRequestId) return;
+
+    state.modsSelectedPath = response.relativePath;
+    state.modsSelectedEditable = true;
+    state.modsSelectedSize = response.size || 0;
+    state.modsSelectedModifiedAt = response.modifiedAt || "";
+    state.modsFileContent = response.content || "";
+    state.modsOriginalContent = response.content || "";
+    state.modsStatusMessage = "";
+    renderModsEditor(true);
+  } catch (error) {
+    if (requestId !== state.modsFileRequestId) return;
+    state.modsSelectedEditable = false;
+    state.modsStatusMessage = error.message || String(error);
+    state.modsFileContent = "";
+    state.modsOriginalContent = "";
+    appendLog("error", error.message || String(error));
+    renderModsEditor(true);
+  }
+}
+
+async function saveModsFile() {
+  if (!modsEditorVisible() || !state.modpackEditorOpen || !state.modsSelectedEditable || !state.modsSelectedPath) return;
+  if (!isModsFileDirty()) return;
+
+  state.modsSaving = true;
+  state.modsStatusMessage = "Salvando arquivo...";
+  renderModsEditor();
+
+  try {
+    const response = await api.writeModFile({
+      versionId: state.selected.id,
+      relativePath: state.modsSelectedPath,
+      content: state.modsFileContent,
+    });
+
+    state.modsOriginalContent = state.modsFileContent;
+    state.modsSelectedSize =
+      response.size || new TextEncoder().encode(state.modsFileContent || "").length;
+    state.modsSelectedModifiedAt = response.modifiedAt || "";
+    state.modsStatusMessage = "Arquivo salvo com sucesso.";
+    state.modsEntries = state.modsEntries.map((entry) =>
+      entry.relativePath === state.modsSelectedPath
+        ? {
+            ...entry,
+            size: state.modsSelectedSize,
+            modifiedAt: state.modsSelectedModifiedAt,
+            editable: true,
+          }
+        : entry
+    );
+  } catch (error) {
+    state.modsStatusMessage = error.message || String(error);
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.modsSaving = false;
+    renderModsEditor();
+  }
+}
+
+function syncModsEditorForSelection(forceReload = false) {
+  if (!modsEditorVisible()) {
+    state.modpackEditorOpen = false;
+    state.addModModalOpen = false;
+    resetModsBrowser();
+    renderModsEditor(true);
+    renderAddModModal();
+    return;
+  }
+
+  renderModsEditor(true);
+  if (state.modpackEditorOpen) {
+    loadModsFiles(forceReload);
+  }
+}
+
+function openModpackEditorModal() {
+  if (!modsEditorVisible()) return;
+  state.modpackEditorOpen = true;
+  renderModsEditor(true);
+  loadModsFiles(true);
+}
+
+function closeModpackEditorModal() {
+  if (!confirmDiscardModsChanges()) return;
+  state.modpackEditorOpen = false;
+  state.addModModalOpen = false;
+  renderModsEditor(true);
+  renderAddModModal();
+}
+
+async function toggleSelectedModpackMod(entry = null) {
+  const resolvedEntry = entry || selectedModpackToggleableEntry();
+  const preserveSelection = resolvedEntry?.relativePath || "";
+  if (!resolvedEntry || !isToggleableModpackEntry(resolvedEntry) || !modsEditorVisible()) return;
+
+  try {
+    const response = await api.toggleModpackFileActive({
+      versionId: state.selected.id,
+      relativePath: resolvedEntry.relativePath,
+      enabled: !isActiveModpackEntry(resolvedEntry),
+    });
+
+    state.modsSelectedPath = response.relativePath || preserveSelection;
+    await loadModsFiles(true);
+    if (state.modsSelectedPath) {
+      const nextEntry = state.modsEntries.find((item) => item.relativePath === state.modsSelectedPath);
+      if (nextEntry) {
+        await openModsFileEntry(nextEntry);
+      }
+    }
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  }
+}
+
+function renderAddModModal() {
+  if (!elements.addModModal || !elements.addModResults) return;
+
+  const visible = state.addModModalOpen && modsEditorVisible() && state.modpackEditorOpen;
+  elements.addModModal.classList.toggle("hidden", !visible);
+  elements.addModModal.setAttribute("aria-hidden", visible ? "false" : "true");
+
+  if (!visible) return;
+
+  if (elements.addModSearch && elements.addModSearch.value !== state.addModQuery) {
+    elements.addModSearch.value = state.addModQuery;
+  }
+
+  elements.addModResults.innerHTML = "";
+
+  if (state.addModLoading) {
+    const loading = document.createElement("div");
+    loading.className = "empty-state mods-empty-state";
+    loading.textContent = "Buscando mods...";
+    elements.addModResults.appendChild(loading);
+    return;
+  }
+
+  if (!state.addModResults.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state mods-empty-state";
+    empty.textContent = state.addModQuery
+      ? "Nenhum mod encontrado"
+      : "Pesquise um mod para adicionar a este modpack.";
+    elements.addModResults.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  state.addModResults.forEach((mod) => {
+    const card = document.createElement("article");
+    card.className = "modpack-item";
+
+    const button = document.createElement("button");
+    button.className = "secondary";
+    button.type = "button";
+    button.textContent = state.installingModId === mod.projectId ? "Adicionando..." : "Adicionar";
+    button.disabled = state.busy || state.installingModId === mod.projectId;
+    button.addEventListener("click", () => startAddModToSelectedModpack(mod));
+
+    card.innerHTML = `
+      ${
+        mod.iconUrl
+          ? `<img class="modpack-icon" src="${escapeHtml(mod.iconUrl)}" alt="" />`
+          : '<div class="modpack-icon-placeholder">M</div>'
+      }
+      <div class="modpack-copy">
+        <strong>${escapeHtml(mod.title)}</strong>
+        <small>${escapeHtml(mod.description || "")}</small>
+      </div>
+      <div class="modpack-actions"></div>
+    `;
+
+    card.querySelector(".modpack-actions").appendChild(button);
+    fragment.appendChild(card);
+  });
+
+  elements.addModResults.appendChild(fragment);
+}
+
+function openAddModPopup() {
+  if (!modsEditorVisible() || !state.modpackEditorOpen) return;
+  state.addModModalOpen = true;
+  renderAddModModal();
+  if (!state.addModResults.length) {
+    searchModsForCurrentModpack(state.addModQuery);
+  }
+}
+
+function closeAddModPopup() {
+  state.addModModalOpen = false;
+  renderAddModModal();
+}
+
+async function searchModsForCurrentModpack(query = "") {
+  if (!modsEditorVisible()) return;
+
+  state.addModLoading = true;
+  state.addModQuery = String(query || "").trim();
+  renderAddModModal();
+
+  try {
+    const selectedFilters = selectedModpackSearchFilters();
+    const result = await api.searchMods(state.addModQuery, {
+      ...(state.modpackFilters || {}),
+      gameVersion: selectedFilters.gameVersion || state.modpackFilters?.gameVersion || "",
+      loader: selectedFilters.loader || state.modpackFilters?.loader || "",
+    });
+    state.addModResults = result.hits || [];
+    state.addModTotalHits = result.totalHits || state.addModResults.length;
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+    state.addModResults = [];
+    state.addModTotalHits = 0;
+  } finally {
+    state.addModLoading = false;
+    renderAddModModal();
+  }
+}
+
+function queueAddModSearch() {
+  closeAddModSearchTimer();
+  state.addModSearchTimer = setTimeout(() => {
+    searchModsForCurrentModpack(state.addModQuery);
+  }, 320);
+}
+
+async function startAddModToSelectedModpack(modProject) {
+  if (!modProject?.projectId || !modsEditorVisible()) return;
+
+  state.installingModId = modProject.projectId;
+  renderAddModModal();
+
+  try {
+    const versions = await api.getModVersions(modProject.projectId);
+    closeAddModPopup();
+    openModVersionModal(modProject, versions, {
+      targetVersionId: state.selected.id,
+      hideTarget: true,
+    });
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.installingModId = null;
+    renderAddModModal();
+  }
+}
+
+function launchModsVisible() {
+  return (
+    state.activeTab === "versions" &&
+    elements.versionFilter?.value === "installed" &&
+    Boolean(state.selected?.id) &&
+    (state.selected?.installed || state.selected?.local) &&
+    isDownloadedModpack(state.selected)
+  );
+}
+
+function renderLaunchModsPanel() {
+  if (!elements.launchModsPanel) return;
+
+  const visible = launchModsVisible();
+  elements.launchModsPanel.classList.toggle("hidden", !visible);
+  if (!visible) return;
+
+  if (elements.launchModsRootLabel) {
+    if (state.launchModsLoading) {
+      elements.launchModsRootLabel.textContent = "Carregando mods dessa versao...";
+    } else if (state.launchModsRootPath) {
+      const suffix = state.launchModsUsingFallbackRoot ? " (usando mods da .minecraft)" : "";
+      elements.launchModsRootLabel.textContent = `${state.launchModsRootPath}${suffix}`;
+    } else {
+      elements.launchModsRootLabel.textContent = "Ative ou desative os mods desta versao antes de jogar.";
+    }
+  }
+
+  if (elements.launchModsRefresh) {
+    elements.launchModsRefresh.disabled = state.busy || state.launchModsLoading;
+  }
+
+  if (elements.launchModsList) {
+    elements.launchModsList.innerHTML = "";
+
+    if (state.launchModsLoading) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state mods-empty-state";
+      empty.textContent = "Carregando mods...";
+      elements.launchModsList.appendChild(empty);
+      return;
+    }
+
+    if (!state.launchModsEntries.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state mods-empty-state";
+      empty.textContent = "Nenhum mod .jar encontrado para essa versao.";
+      elements.launchModsList.appendChild(empty);
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    state.launchModsEntries.forEach((entry) => {
+      const row = document.createElement("article");
+      row.className = "launch-mod-item";
+      row.innerHTML = `
+        <div class="launch-mod-copy">
+          <strong>${escapeHtml(entry.displayName)}</strong>
+          <small>${escapeHtml(entry.relativePath)}</small>
+        </div>
+      `;
+
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = `launch-mod-toggle ${entry.enabled ? "enabled" : "ghost"}`;
+      toggle.textContent = entry.enabled ? "Ativado" : "Desativado";
+      toggle.disabled = state.busy || state.launchModsLoading;
+      toggle.addEventListener("click", () => toggleLaunchModEntry(entry));
+      row.appendChild(toggle);
+      fragment.appendChild(row);
+    });
+
+    if (state.launchModsTruncated) {
+      const notice = document.createElement("div");
+      notice.className = "mods-list-notice";
+      notice.textContent = "Lista parcial: muitos mods nesta pasta.";
+      fragment.appendChild(notice);
+    }
+
+    elements.launchModsList.appendChild(fragment);
+  }
+}
+
+async function loadLaunchMods(forceReload = false) {
+  if (!launchModsVisible()) {
+    state.launchModsEntries = [];
+    state.launchModsRootPath = "";
+    state.launchModsUsingFallbackRoot = false;
+    state.launchModsLoadedVersionId = null;
+    state.launchModsTruncated = false;
+    state.launchModsLoading = false;
+    renderLaunchModsPanel();
+    return;
+  }
+
+  const versionId = state.selected.id;
+  if (!forceReload && state.launchModsLoadedVersionId === versionId && state.launchModsEntries.length) {
+    renderLaunchModsPanel();
+    return;
+  }
+
+  state.launchModsLoading = true;
+  renderLaunchModsPanel();
+
+  try {
+    const response = await api.listLaunchMods({ versionId });
+    state.launchModsEntries = Array.isArray(response?.entries) ? response.entries : [];
+    state.launchModsRootPath = response?.rootPath || "";
+    state.launchModsUsingFallbackRoot = Boolean(response?.usingFallbackRoot);
+    state.launchModsLoadedVersionId = versionId;
+    state.launchModsTruncated = Boolean(response?.truncated);
+  } catch (error) {
+    state.launchModsEntries = [];
+    state.launchModsRootPath = "";
+    state.launchModsUsingFallbackRoot = false;
+    state.launchModsLoadedVersionId = null;
+    state.launchModsTruncated = false;
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.launchModsLoading = false;
+    renderLaunchModsPanel();
+  }
+}
+
+async function toggleLaunchModEntry(entry) {
+  if (!launchModsVisible() || !entry?.relativePath) return;
+
+  try {
+    await api.toggleLaunchMod({
+      versionId: state.selected.id,
+      relativePath: entry.relativePath,
+      enabled: !entry.enabled,
+    });
+    await loadLaunchMods(true);
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  }
+}
+
+function syncLaunchModsForSelection(forceReload = false) {
+  loadLaunchMods(forceReload);
 }
 
 function versionSortSource(version) {
@@ -1216,12 +2763,15 @@ function renderVersions() {
     button.innerHTML = `
       <span class="version-main">
         <strong>${escapeHtml(versionDisplayName(version))}</strong>
+        ${renderTagRow(version.modpackTags)}
       </span>
     `;
     button.addEventListener("click", () => {
       state.selected = version;
       renderSelected();
       renderVersions();
+      syncModsEditorForSelection();
+      syncLaunchModsForSelection();
     });
     fragment.appendChild(button);
   });
@@ -1259,14 +2809,74 @@ function renderDownloadedModpacks() {
     button.innerHTML = `
       <span class="version-main">
         <strong>${escapeHtml(versionDisplayName(version))}</strong>
+        <small>${escapeHtml(versionCompactDetails(version) || "-")}</small>
       </span>
     `;
     button.addEventListener("click", () => {
       state.selected = version;
       renderSelected();
       renderCatalog();
+      syncModsEditorForSelection();
     });
     fragment.appendChild(button);
+  });
+
+  elements.versionList.appendChild(fragment);
+}
+
+function renderModsCatalog() {
+  elements.versionList.innerHTML = "";
+
+  if (state.modsCatalogLoading) {
+    const loading = document.createElement("div");
+    loading.className = "empty-state";
+    loading.textContent = "Buscando mods no Modrinth...";
+    elements.versionList.appendChild(loading);
+    return;
+  }
+
+  if (!state.modsCatalog.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = state.modpackQuery
+      ? "Nenhum mod encontrado"
+      : "Pesquise mods do Modrinth para instalar";
+    elements.versionList.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  state.modsCatalog.forEach((mod) => {
+    const card = document.createElement("article");
+    card.className = "modpack-item";
+    if (state.selected && state.selected.projectId === mod.projectId) {
+      card.classList.add("selected");
+    }
+
+    const button = document.createElement("button");
+    button.className = "secondary";
+    button.type = "button";
+    button.textContent = state.installingModId === mod.projectId ? "Instalando..." : "Instalar";
+    button.disabled = state.busy || state.installingModId === mod.projectId;
+    button.addEventListener("click", () => startModInstall(mod));
+
+    card.innerHTML = `
+      ${
+        mod.iconUrl
+          ? `<img class="modpack-icon" src="${escapeHtml(mod.iconUrl)}" alt="" />`
+          : '<div class="modpack-icon-placeholder">M</div>'
+      }
+      <div class="modpack-copy">
+        <strong>${escapeHtml(mod.title)}</strong>
+        <small>${escapeHtml(mod.description || "")}</small>
+      </div>
+      <div class="modpack-actions"></div>
+    `;
+
+    const actions = card.querySelector(".modpack-actions");
+    actions.appendChild(button);
+    fragment.appendChild(card);
   });
 
   elements.versionList.appendChild(fragment);
@@ -1275,6 +2885,11 @@ function renderDownloadedModpacks() {
 function renderModpacks() {
   if (state.activeModpacksTab === "downloaded") {
     renderDownloadedModpacks();
+    return;
+  }
+
+  if (state.activeCatalogKind === "mods") {
+    renderModsCatalog();
     return;
   }
 
@@ -1323,6 +2938,7 @@ function renderModpacks() {
       }
       <div class="modpack-copy">
         <strong>${escapeHtml(modpack.title)}</strong>
+        ${renderTagRow(modpackGenreTags(modpack.categories), "modpack-tags")}
       </div>
       <div class="modpack-actions"></div>
     `;
@@ -1355,14 +2971,19 @@ function renderSelected() {
 
   // Se for um modpack do Modrinth (tem projectId, não tem id de versão)
   if (state.selected.projectId && !state.selected.minecraftVersion) {
-    elements.selectedVersion.textContent = escapeHtml(state.selected.title || "Modpack");
+    elements.selectedVersion.textContent = escapeHtml(
+      state.selected.title || (state.activeCatalogKind === "mods" ? "Mod" : "Modpack")
+    );
     const meta = [
       state.selected.author ? `por ${state.selected.author}` : "",
       `${formatCompactNumber(state.selected.downloads)} downloads`
     ].filter(Boolean).join(" - ");
-    elements.selectedMeta.textContent = meta || "Modpack do Modrinth";
+    elements.selectedMeta.textContent = meta || (state.activeCatalogKind === "mods" ? "Mod do Modrinth" : "Modpack do Modrinth");
   } else {
-    elements.selectedVersion.textContent = versionDisplayName(state.selected);
+    const compactDetails = versionCompactDetails(state.selected);
+    elements.selectedVersion.innerHTML = compactDetails
+      ? `${escapeHtml(versionDisplayName(state.selected))}<small class="selected-version-inline-meta">${escapeHtml(compactDetails)}</small>`
+      : escapeHtml(versionDisplayName(state.selected));
     elements.selectedMeta.textContent = versionDescription(state.selected);
   }
   syncActionButtons();
@@ -1370,12 +2991,26 @@ function renderSelected() {
 
 function renderLatest() {
   if (state.activeTab === "modpacks") {
-    elements.topbarTitle.textContent = "Modpacks";
+    if (elements.createModpackButton) {
+      elements.createModpackButton.classList.toggle("hidden", state.activeModpacksTab !== "downloaded");
+    }
+    elements.topbarTitle.textContent =
+      state.activeModpacksTab === "downloaded"
+        ? "Modpacks"
+        : state.activeCatalogKind === "mods"
+          ? "Mods"
+          : "Modpacks";
     if (state.activeModpacksTab === "downloaded") {
       const total = downloadedModpacks().length;
       elements.latestLine.textContent = total
         ? `${total} modpacks baixados`
         : "Seus modpacks instalados aparecem aqui.";
+    } else if (state.activeCatalogKind === "mods" && state.modsCatalogLoading) {
+      elements.latestLine.textContent = "Buscando catalogo de mods do Modrinth...";
+    } else if (state.activeCatalogKind === "mods" && state.modsCatalog.length) {
+      elements.latestLine.textContent = `${state.modsCatalogTotalHits || state.modsCatalog.length} mods encontrados`;
+    } else if (state.activeCatalogKind === "mods") {
+      elements.latestLine.textContent = "Pesquise mods do Modrinth para instalar.";
     } else if (state.modpacksLoading) {
       elements.latestLine.textContent = "Buscando catalogo do Modrinth...";
     } else if (state.modpacks.length) {
@@ -1385,7 +3020,16 @@ function renderLatest() {
     }
     elements.versionFilter.classList.add("hidden");
     elements.modpackSubtabs.classList.remove("hidden");
-    elements.modpacksSearchTab.classList.toggle("active", state.activeModpacksTab === "search");
+    if (elements.catalogModsTab) {
+      elements.catalogModsTab.classList.toggle(
+        "active",
+        state.activeModpacksTab !== "downloaded" && state.activeCatalogKind === "mods"
+      );
+    }
+    elements.modpacksSearchTab.classList.toggle(
+      "active",
+      state.activeModpacksTab !== "downloaded" && state.activeCatalogKind === "modpacks"
+    );
     elements.modpacksDownloadedTab.classList.toggle(
       "active",
       state.activeModpacksTab === "downloaded"
@@ -1398,6 +3042,10 @@ function renderLatest() {
     }
     renderModpackFilterUI();
     return;
+  }
+
+  if (elements.createModpackButton) {
+    elements.createModpackButton.classList.add("hidden");
   }
 
   elements.topbarTitle.textContent = "Versões";
@@ -1444,6 +3092,28 @@ function renderModpackFilterUI() {
 }
 
 async function refreshModpacks(query = state.modpackQuery) {
+  if (state.activeCatalogKind === "mods") {
+    state.modsCatalogLoading = true;
+    state.modpackQuery = String(query || "").trim();
+    renderLatest();
+    renderCatalog();
+
+    try {
+      const result = await api.searchMods(state.modpackQuery, state.modpackFilters);
+      state.modsCatalog = result.hits || [];
+      state.modsCatalogTotalHits = result.totalHits || state.modsCatalog.length;
+    } catch (error) {
+      appendLog("error", error.message || String(error));
+      state.modsCatalog = [];
+      state.modsCatalogTotalHits = 0;
+    } finally {
+      state.modsCatalogLoading = false;
+      renderLatest();
+      renderCatalog();
+    }
+    return;
+  }
+
   state.modpacksLoading = true;
   state.modpackQuery = String(query || "").trim();
   renderLatest();
@@ -1474,11 +3144,34 @@ function queueModpackSearch() {
 function setActiveModpacksTab(tab) {
   if (state.activeModpacksTab === tab) return;
   state.activeModpacksTab = tab;
-  if (tab === "search" && !state.modpacks.length && !state.modpacksLoading) {
+  if (tab === "downloaded") {
+    state.activeCatalogKind = "modpacks";
+  }
+  if (
+    tab === "search" &&
+    ((state.activeCatalogKind === "modpacks" && !state.modpacks.length && !state.modpacksLoading) ||
+      (state.activeCatalogKind === "mods" && !state.modsCatalog.length && !state.modsCatalogLoading))
+  ) {
     refreshModpacks(state.modpackQuery);
   }
   renderLatest();
   renderCatalog();
+  syncModsEditorForSelection();
+  syncLaunchModsForSelection();
+}
+
+function setActiveCatalogKind(kind) {
+  if (state.activeCatalogKind === kind) return;
+  state.activeCatalogKind = kind;
+  state.selected = null;
+  renderSelected();
+  renderLatest();
+  renderCatalog();
+  syncModsEditorForSelection();
+  syncLaunchModsForSelection();
+  if (state.activeModpacksTab === "search") {
+    refreshModpacks(elements.versionSearch.value);
+  }
 }
 
 function setActiveTab(tab) {
@@ -1500,7 +3193,11 @@ function setActiveTab(tab) {
     elements.versionSearch.value = "";
   } else {
     elements.versionSearch.value = state.modpackQuery;
-    if (state.activeModpacksTab === "search" && !state.modpacks.length && !state.modpacksLoading) {
+    if (
+      state.activeModpacksTab === "search" &&
+      ((state.activeCatalogKind === "modpacks" && !state.modpacks.length && !state.modpacksLoading) ||
+        (state.activeCatalogKind === "mods" && !state.modsCatalog.length && !state.modsCatalogLoading))
+    ) {
       refreshModpacks(state.modpackQuery);
     }
   }
@@ -1508,6 +3205,8 @@ function setActiveTab(tab) {
   renderLatest();
   renderCatalog();
   renderSelected();
+  syncModsEditorForSelection();
+  syncLaunchModsForSelection();
 }
 
 async function startModpackInstall(modpack) {
@@ -1516,6 +3215,7 @@ async function startModpackInstall(modpack) {
   // Marcar o modpack como selecionado no painel de seleção
   state.selected = modpack;
   renderSelected();
+  syncModsEditorForSelection();
 
   state.installingModpackId = modpack.projectId;
   setBusy(true);
@@ -1533,6 +3233,68 @@ async function startModpackInstall(modpack) {
     appendLog("error", error.message || String(error));
   } finally {
     state.installingModpackId = null;
+    setBusy(false);
+    renderCatalog();
+  }
+}
+
+async function startModInstall(modProject) {
+  if (!modProject?.projectId) return;
+
+  state.selected = modProject;
+  renderSelected();
+
+  state.installingModId = modProject.projectId;
+  setBusy(true);
+  renderCatalog();
+
+  try {
+    const versions = await api.getModVersions(modProject.projectId);
+    if (!installedVersionsForMods().length) {
+      throw new Error("Instale pelo menos uma versao primeiro para receber mods.");
+    }
+    openModVersionModal(modProject, versions);
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.installingModId = null;
+    setBusy(false);
+    renderCatalog();
+  }
+}
+
+async function installSelectedModVersion(modVersionId) {
+  if (!state.pendingModProject?.projectId) return;
+  const targetVersionId = state.pendingModTargetVersionId || elements.modpackTargetVersion?.value || "";
+  if (!targetVersionId) {
+    appendLog("error", "Escolha a versao instalada que recebera o mod.");
+    return;
+  }
+
+  const modProject = state.pendingModProject;
+
+  state.installingModId = modProject.projectId;
+  setBusy(true);
+  renderCatalog();
+
+  try {
+    closeModpackVersionModal();
+    await api.installMod({
+      ...modProject,
+      versionId: modVersionId,
+      targetVersionId,
+    });
+    appendLog("success", `Mod instalado em ${targetVersionId}.`);
+    if (state.selected?.id === targetVersionId) {
+      loadModsFiles(true);
+    }
+    if (state.activeTab === "versions" && state.selected?.id === targetVersionId) {
+      syncLaunchModsForSelection(true);
+    }
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  } finally {
+    state.installingModId = null;
     setBusy(false);
     renderCatalog();
   }
@@ -1558,6 +3320,7 @@ async function installModpackVersion(modpack, versionId = null) {
     renderLatest();
     renderSelected();
     renderCatalog();
+    syncModsEditorForSelection(true);
   } catch (error) {
     appendLog("error", error.message || String(error));
   } finally {
@@ -1910,6 +3673,8 @@ async function refreshState(forceVersions = false) {
     renderLatest();
     renderSelected();
     renderCatalog();
+    syncModsEditorForSelection();
+    syncLaunchModsForSelection();
     clearProgress();
   } catch (error) {
     appendLog("error", error.message || String(error));
@@ -1954,6 +3719,8 @@ async function runAction(action) {
       renderLatest();
       renderSelected();
       renderVersions();
+      syncModsEditorForSelection(true);
+      syncLaunchModsForSelection(true);
       setBusy(false);
     } else {
       await api.launchMinecraft(payload);
@@ -1989,6 +3756,8 @@ async function uninstallSelectedVersion() {
     renderLatest();
     renderSelected();
     renderCatalog();
+    syncModsEditorForSelection();
+    syncLaunchModsForSelection();
   } catch (error) {
     appendLog("error", error.message || String(error));
   } finally {
@@ -2043,9 +3812,54 @@ elements.modpackVersionModal.addEventListener("click", (event) => {
     closeModpackVersionModal();
   }
 });
+if (elements.openModpackEditor) {
+  elements.openModpackEditor.addEventListener("click", openModpackEditorModal);
+}
+if (elements.closeModpackEditor) {
+  elements.closeModpackEditor.addEventListener("click", closeModpackEditorModal);
+}
+if (elements.modpackEditorModal) {
+  elements.modpackEditorModal.addEventListener("click", (event) => {
+    if (event.target === elements.modpackEditorModal) {
+      closeModpackEditorModal();
+    }
+  });
+}
+if (elements.openAddModModal) {
+  elements.openAddModModal.addEventListener("click", openAddModPopup);
+}
+if (elements.closeAddModModal) {
+  elements.closeAddModModal.addEventListener("click", closeAddModPopup);
+}
+if (elements.cancelAddModModal) {
+  elements.cancelAddModModal.addEventListener("click", closeAddModPopup);
+}
+if (elements.addModModal) {
+  elements.addModModal.addEventListener("click", (event) => {
+    if (event.target === elements.addModModal) {
+      closeAddModPopup();
+    }
+  });
+}
+if (elements.addModSearch) {
+  elements.addModSearch.addEventListener("input", (event) => {
+    state.addModQuery = event.target.value || "";
+    queueAddModSearch();
+  });
+}
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") {
+    return;
+  }
+
+  if (state.addModModalOpen) {
+    closeAddModPopup();
+    return;
+  }
+
+  if (state.modpackEditorOpen) {
+    closeModpackEditorModal();
     return;
   }
 
@@ -2241,6 +4055,7 @@ elements.refreshVersions.addEventListener("click", async () => {
       state.latest = data.latest;
       renderLatest();
       renderCatalog();
+      syncLaunchModsForSelection(true);
     } catch (error) {
       appendLog("error", error.message || String(error));
     } finally {
@@ -2269,6 +4084,7 @@ elements.refreshVersions.addEventListener("click", async () => {
 elements.versionFilter.addEventListener("change", () => {
   saveSettingsQuietly();
   renderCatalog();
+  syncLaunchModsForSelection(true);
 });
 
 elements.versionSearch.addEventListener("input", () => {
@@ -2280,8 +4096,92 @@ elements.versionSearch.addEventListener("input", () => {
 
   renderCatalog();
 });
-elements.modpacksSearchTab.addEventListener("click", () => setActiveModpacksTab("search"));
+if (elements.createModpackButton) {
+  elements.createModpackButton.addEventListener("click", openCreateModpackModal);
+}
+if (elements.closeCreateModpackModal) {
+  elements.closeCreateModpackModal.addEventListener("click", closeCreateModpackModal);
+}
+if (elements.cancelCreateModpack) {
+  elements.cancelCreateModpack.addEventListener("click", closeCreateModpackModal);
+}
+if (elements.backCreateModpackStep) {
+  elements.backCreateModpackStep.addEventListener("click", () => {
+    if (state.createModpackLoading) return;
+    state.createModpackStep = 1;
+    state.createModpackError = "";
+    renderCreateModpackModal();
+  });
+}
+if (elements.confirmCreateModpack) {
+  elements.confirmCreateModpack.addEventListener("click", createCustomModpackFromModal);
+}
+if (elements.createModpackModal) {
+  elements.createModpackModal.addEventListener("click", (event) => {
+    if (event.target === elements.createModpackModal) {
+      closeCreateModpackModal();
+    }
+  });
+}
+if (elements.createModpackName) {
+  elements.createModpackName.addEventListener("input", (event) => {
+    state.createModpackName = event.target.value || "";
+    state.createModpackError = "";
+    refreshCreateModpackNameState();
+  });
+}
+if (elements.createModpackTags) {
+  elements.createModpackTags.addEventListener("input", (event) => {
+    state.createModpackTags = event.target.value || "";
+    state.createModpackError = "";
+    refreshCreateModpackNameState();
+  });
+}
+if (elements.createModpackVersion) {
+  elements.createModpackVersion.addEventListener("change", (event) => {
+    state.createModpackMinecraftVersion = event.target.value || "";
+    state.createModpackError = "";
+    state.createModpackSelectedMods = [];
+    state.createModpackModsResults = [];
+    state.createModpackModsQuery = "";
+    ensureCreateModpackSelections();
+    renderCreateModpackModal();
+  });
+}
+if (elements.createModpackLoader) {
+  elements.createModpackLoader.addEventListener("change", (event) => {
+    state.createModpackLoader = event.target.value || "";
+    state.createModpackError = "";
+    state.createModpackSelectedMods = [];
+    state.createModpackModsResults = [];
+    state.createModpackModsQuery = "";
+    renderCreateModpackModal();
+  });
+}
+if (elements.createModpackModSearch) {
+  elements.createModpackModSearch.addEventListener("input", (event) => {
+    state.createModpackModsQuery = event.target.value || "";
+    state.createModpackError = "";
+    queueCreateModpackModsSearch();
+  });
+}
+if (elements.clearCreateModpackMods) {
+  elements.clearCreateModpackMods.addEventListener("click", () => {
+    state.createModpackSelectedMods = [];
+    renderCreateModpackModal();
+  });
+}
+elements.modpacksSearchTab.addEventListener("click", () => {
+  setActiveCatalogKind("modpacks");
+  setActiveModpacksTab("search");
+});
 elements.modpacksDownloadedTab.addEventListener("click", () => setActiveModpacksTab("downloaded"));
+if (elements.catalogModsTab) {
+  elements.catalogModsTab.addEventListener("click", () => {
+    setActiveCatalogKind("mods");
+    setActiveModpacksTab("search");
+  });
+}
 elements.installVersion.addEventListener("click", () => runAction("install"));
 elements.uninstallVersion.addEventListener("click", uninstallSelectedVersion);
 elements.launchVersion.addEventListener("click", () => runAction("launch"));
@@ -2410,6 +4310,39 @@ document.addEventListener("click", (e) => {
     }
   }
 });
+
+if (elements.modsRefresh) {
+  elements.modsRefresh.addEventListener("click", () => {
+    syncModsEditorForSelection(true);
+  });
+}
+
+if (elements.launchModsRefresh) {
+  elements.launchModsRefresh.addEventListener("click", () => {
+    syncLaunchModsForSelection(true);
+  });
+}
+
+if (elements.modsSave) {
+  elements.modsSave.addEventListener("click", saveModsFile);
+}
+
+if (elements.modsFileContent) {
+  elements.modsFileContent.addEventListener("input", (event) => {
+    state.modsFileContent = event.target.value || "";
+    if (state.modsSelectedEditable) {
+      state.modsStatusMessage = "";
+    }
+    renderModsEditor();
+  });
+
+  elements.modsFileContent.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      saveModsFile();
+    }
+  });
+}
 
 api.onEvent(handleLauncherEvent);
 refreshState();

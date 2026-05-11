@@ -39,6 +39,9 @@ const LEGACY_JAVA_RUNTIME_DOWNLOADS = {
 const SETTINGS_SCHEMA_VERSION = 3;
 const REMOTE_GAME_VERSION_LIMIT = 120;
 const MAX_ACCOUNT_SKIN_BYTES = 2 * 1024 * 1024;
+const MAX_MOD_EDITOR_FILE_BYTES = 1024 * 1024;
+const MOD_EDITOR_BINARY_SAMPLE_BYTES = 8192;
+const MAX_MOD_EDITOR_LISTING = 5000;
 const ACCOUNT_SKIN_PREVIEW_SIZE = 8;
 const SESSION_SKIN_VERIFY_RETRY_DELAY_MS = 65000;
 const SHARED_INSTANCE_DIRECTORIES = [
@@ -2430,13 +2433,14 @@ function localVersionFromDirectory(entry) {
   if (!entry.isDirectory()) return null;
 
   const id = entry.name;
+  const versionRoot = versionDirectory(id);
   const versionJsonPath = getLocalVersionJsonPath(id);
   const versionJarPath = findLocalVersionJar(id);
   const versionJson = readJson(versionJsonPath, null);
 
   if (!versionJson && !versionJarPath) return null;
 
-  const stats = fs.statSync(versionDirectory(id));
+  const stats = fs.statSync(versionRoot);
   return {
     id,
     type: versionJson?.type || (versionJson?.inheritsFrom ? "custom" : "local"),
@@ -2451,9 +2455,11 @@ function localVersionFromDirectory(entry) {
     loaderType: versionJson?.loaderType || null,
     loaderVersion: versionJson?.loaderVersion || null,
     modpackTitle: versionJson?.modpackTitle || null,
+    modpackTags: Array.isArray(versionJson?.modpackTags) ? versionJson.modpackTags.filter(Boolean) : [],
     modpackProjectId: versionJson?.modpackProjectId || null,
     modpackVersionId: versionJson?.modpackVersionId || null,
     modpackVersionNumber: versionJson?.modpackVersionNumber || null,
+    hasVersionMods: directoryHasFiles(path.join(versionRoot, "mods")),
   };
 }
 
@@ -3275,6 +3281,26 @@ function searchModpacksUrl(query, filters = {}, limit = 24) {
   return url.toString();
 }
 
+function searchModsUrl(query, filters = {}, limit = 24) {
+  const url = new URL(`${MODRINTH_API_ROOT}/search`);
+  const normalizedQuery = String(query || "").trim();
+  url.searchParams.set("limit", String(Math.min(50, Math.max(1, Number(limit) || 24))));
+  url.searchParams.set("index", normalizedQuery ? "relevance" : "downloads");
+
+  const facets = [["project_type:mod"]];
+  const loader = String(filters.loader || "").trim().toLowerCase();
+  const gameVersion = String(filters.gameVersion || "").trim();
+  if (loader) facets.push([`categories:${loader}`]);
+  if (gameVersion) facets.push([`versions:${gameVersion}`]);
+  url.searchParams.set("facets", JSON.stringify(facets));
+
+  if (normalizedQuery) {
+    url.searchParams.set("query", normalizedQuery);
+  }
+
+  return url.toString();
+}
+
 async function searchModpacks(query, filters = {}, limit = 24) {
   const result = await fetchJson(searchModpacksUrl(query, filters, limit), "Modrinth search");
   const hits = Array.isArray(result?.hits) ? result.hits : [];
@@ -3304,6 +3330,37 @@ async function searchModpacks(query, filters = {}, limit = 24) {
   };
 }
 
+async function searchMods(query, filters = {}, limit = 24) {
+  const result = await fetchJson(searchModsUrl(query, filters, limit), "Modrinth mod search");
+  const hits = Array.isArray(result?.hits) ? result.hits : [];
+
+  return {
+    hits: hits.map((hit) => ({
+      projectId: hit.project_id,
+      slug: hit.slug || hit.project_id,
+      title: hit.title || hit.name || hit.project_id,
+      description: hit.description || hit.summary || "",
+      author: hit.author || "",
+      iconUrl: hit.icon_url || "",
+      downloads: Number(hit.downloads) || 0,
+      follows: Number(hit.follows) || 0,
+      latestVersion: hit.latest_version || "",
+      gameVersions: Array.isArray(hit.versions) ? hit.versions : [],
+      categories:
+        Array.isArray(hit.display_categories) && hit.display_categories.length
+          ? hit.display_categories
+          : Array.isArray(hit.categories)
+            ? hit.categories
+            : [],
+      clientSide: hit.client_side || "unknown",
+      serverSide: hit.server_side || "unknown",
+    })),
+    totalHits: Number(result?.total_hits) || hits.length,
+    offset: Number(result?.offset) || 0,
+    limit: Number(result?.limit) || limit,
+  };
+}
+
 async function modrinthProjectVersions(projectId) {
   const url = new URL(
     `${MODRINTH_API_ROOT}/project/${encodeURIComponent(projectId)}/version`
@@ -3316,6 +3373,48 @@ async function modrinthProjectVersions(projectId) {
 function primaryModpackFile(version) {
   if (!Array.isArray(version?.files) || !version.files.length) return null;
   return version.files.find((file) => file?.primary) || version.files[0];
+}
+
+function primaryModFile(version) {
+  if (!Array.isArray(version?.files) || !version.files.length) return null;
+
+  return (
+    version.files.find((file) => file?.primary && /\.jar$/i.test(String(file?.filename || ""))) ||
+    version.files.find((file) => /\.jar$/i.test(String(file?.filename || ""))) ||
+    version.files.find((file) => file?.primary) ||
+    version.files[0]
+  );
+}
+
+function modVersionInfo(version) {
+  const primaryFile = primaryModFile(version);
+  return {
+    id: version?.id,
+    name: version?.name || version?.version_number || version?.id,
+    versionNumber: version?.version_number || version?.name || version?.id,
+    minecraftVersions: Array.isArray(version?.game_versions)
+      ? version.game_versions.filter(Boolean)
+      : [],
+    loaders: Array.isArray(version?.loaders)
+      ? version.loaders.filter((loader) => String(loader || "").trim() && String(loader || "").trim().toLowerCase() !== "minecraft")
+      : [],
+    publishedAt: version?.date_published || version?.date_created || null,
+    featured: Boolean(version?.featured),
+    downloads: Number(version?.downloads) || 0,
+    fileName: primaryFile?.filename || "",
+  };
+}
+
+function compatibleModVersions(versions) {
+  const results = [];
+
+  for (const version of Array.isArray(versions) ? versions : []) {
+    const file = primaryModFile(version);
+    if (!file?.url) continue;
+    results.push(modVersionInfo(version));
+  }
+
+  return results;
 }
 
 function modpackDependencyInfo(dependencies) {
@@ -3596,6 +3695,21 @@ async function getModpackVersions(projectId) {
   return compatible;
 }
 
+async function getModVersions(projectId) {
+  if (!projectId) {
+    throw new Error("Projeto do mod nao informado.");
+  }
+
+  const versions = await modrinthProjectVersions(projectId);
+  const compatible = compatibleModVersions(versions);
+
+  if (!compatible.length) {
+    throw new Error("Nenhuma versao compativel do mod foi encontrada.");
+  }
+
+  return compatible;
+}
+
 function modpackInstallVersionId(project, version) {
   const slug = sanitizeFileName(project?.slug || project?.projectId || project?.title || "modpack")
     .toLowerCase();
@@ -3771,10 +3885,31 @@ async function prepareModpackBaseJson(versionInfo) {
 
 function buildInstalledModpackVersionJson(modpackId, project, version, versionInfo, baseJson) {
   const versionJson = normalizeVersionShape(cloneJson(baseJson || {}));
+  const preparedBaseId = String(baseJson?.id || "").trim();
+  const shouldInheritPreparedBase =
+    Boolean(preparedBaseId) &&
+    preparedBaseId !== modpackId &&
+    preparedBaseId !== String(versionInfo?.minecraftVersion || "").trim();
 
   versionJson.id = modpackId;
   versionJson.type = "modpack";
-  versionJson.inheritsFrom = versionJson.inheritsFrom || versionInfo.minecraftVersion;
+  versionJson.inheritsFrom = shouldInheritPreparedBase
+    ? preparedBaseId
+    : versionJson.inheritsFrom || versionInfo.minecraftVersion;
+
+  if (shouldInheritPreparedBase) {
+    delete versionJson.mainClass;
+    delete versionJson.libraries;
+    delete versionJson.arguments;
+    delete versionJson.minecraftArguments;
+    delete versionJson.assetIndex;
+    delete versionJson.assets;
+    delete versionJson.downloads;
+    delete versionJson.javaVersion;
+    delete versionJson.logging;
+    delete versionJson.jar;
+  }
+
   versionJson.time = new Date().toISOString();
   versionJson.releaseTime = version?.date_published || new Date().toISOString();
   versionJson.minecraftVersion = versionInfo.minecraftVersion;
@@ -3783,12 +3918,123 @@ function buildInstalledModpackVersionJson(modpackId, project, version, versionIn
   versionJson.modpackProjectId = project.projectId;
   versionJson.modpackVersionId = version.id;
   versionJson.modpackTitle = project.title || project.projectId;
+  versionJson.modpackTags = Array.isArray(project.tags)
+    ? [...new Set(project.tags.map((tag) => String(tag || "").trim()).filter(Boolean))]
+    : Array.isArray(project.categories)
+      ? [...new Set(project.categories.map((tag) => String(tag || "").trim()).filter(Boolean))]
+      : [];
   versionJson.modpackVersionNumber = version.version_number || version.name || version.id;
   if (project.author) {
     versionJson.modpackAuthor = project.author;
   }
 
   return versionJson;
+}
+
+function customModpackVersionId(name, minecraftVersion, loaderType) {
+  const namePart = sanitizeFileName(name || "modpack").toLowerCase() || "modpack";
+  const versionPart = sanitizeFileName(minecraftVersion || "mc").toLowerCase() || "mc";
+  const loaderPart = sanitizeFileName(loaderType || "loader").toLowerCase() || "loader";
+  const baseId = `custom-${namePart}-${versionPart}-${loaderPart}`;
+
+  let candidate = baseId;
+  let counter = 2;
+  while (fs.existsSync(versionDirectory(candidate))) {
+    candidate = `${baseId}-${counter}`;
+    counter += 1;
+  }
+
+  return candidate;
+}
+
+async function createCustomModpack(payload) {
+  if (busy) throw new Error("Ja existe uma instalacao ou jogo em andamento.");
+
+  const name = String(payload?.name || "").trim();
+  const minecraftVersion = String(payload?.minecraftVersion || "").trim();
+  const loaderType = String(payload?.loaderType || "").trim().toLowerCase();
+  const tags = Array.isArray(payload?.tags)
+    ? [...new Set(payload.tags.map((tag) => String(tag || "").trim()).filter(Boolean))]
+    : [];
+
+  if (!name) {
+    throw new Error("Informe o nome do modpack.");
+  }
+  if (!minecraftVersion) {
+    throw new Error("Escolha a versao do Minecraft.");
+  }
+  if (!["fabric", "forge", "neoforge"].includes(loaderType)) {
+    throw new Error("Escolha um loader valido para o modpack.");
+  }
+
+  busy = true;
+  sendEvent("install", `Criando modpack ${name}...`);
+
+  try {
+    const manifest = await loadVersions(false);
+    const loaderVersion = (manifest?.versions || []).find(
+      (version) =>
+        Boolean(version?.remoteLoader) &&
+        !version?.local &&
+        String(version?.minecraftVersion || "").trim() === minecraftVersion &&
+        String(version?.loaderType || "").trim().toLowerCase() === loaderType
+    );
+
+    if (!loaderVersion) {
+      throw new Error(`Nao foi encontrada uma combinacao compativel de ${loaderType} para Minecraft ${minecraftVersion}.`);
+    }
+
+    const versionInfo = {
+      minecraftVersion,
+      loaderType,
+      loaderVersion: String(loaderVersion.loaderVersion || "").trim(),
+      rawVersion: String(loaderVersion.rawVersion || "").trim() || undefined,
+    };
+    const modpackId = customModpackVersionId(name, minecraftVersion, loaderType);
+    const versionRoot = versionDirectory(modpackId);
+
+    fs.mkdirSync(path.join(versionRoot, "mods"), { recursive: true });
+
+    const baseJson = await prepareModpackBaseJson(versionInfo);
+    const versionJson = buildInstalledModpackVersionJson(
+      modpackId,
+      {
+        projectId: `custom:${modpackId}`,
+        title: name,
+        author: "Local",
+        tags,
+      },
+      {
+        id: `custom-${loaderType}-${minecraftVersion}`,
+        version_number: "custom",
+        date_published: new Date().toISOString(),
+      },
+      versionInfo,
+      baseJson
+    );
+
+    versionJson.customModpack = true;
+    versionJson.modpackVersionNumber = "custom";
+    writeJson(getLocalVersionJsonPath(modpackId), versionJson);
+
+    await loadVersions(true).catch(() => null);
+
+    sendEvent("success", `${name} criado com sucesso.`);
+    return {
+      ok: true,
+      versionId: modpackId,
+      title: name,
+      tags,
+      minecraftVersion,
+      loaderType,
+      loaderVersion: versionInfo.loaderVersion,
+    };
+  } catch (error) {
+    sendEvent("error", error.message || String(error));
+    throw error;
+  } finally {
+    busy = false;
+  }
 }
 
 async function installModpack(payload) {
@@ -3912,6 +4158,78 @@ async function installModpack(payload) {
   } finally {
     busy = false;
     globalDownloadTracker = null;
+  }
+}
+
+async function installMod(payload) {
+  if (busy) throw new Error("Ja existe uma instalacao ou jogo em andamento.");
+  if (!payload?.projectId) {
+    throw new Error("Projeto do mod nao informado.");
+  }
+  if (!payload?.versionId) {
+    throw new Error("Versao do mod nao informada.");
+  }
+  if (!payload?.targetVersionId) {
+    throw new Error("Escolha em qual versao instalada o mod sera colocado.");
+  }
+
+  busy = true;
+  const modLabel = payload.title || payload.projectId;
+  sendEvent("install", `Buscando mod ${modLabel}...`);
+
+  try {
+    const projectVersions = await modrinthProjectVersions(payload.projectId);
+    const selectedVersion = projectVersions.find(
+      (version) => String(version?.id || "") === String(payload.versionId || "")
+    );
+
+    if (!selectedVersion) {
+      throw new Error("A versao escolhida do mod nao foi encontrada.");
+    }
+
+    const file = primaryModFile(selectedVersion);
+    if (!file?.url) {
+      throw new Error("A versao escolhida nao possui arquivo para download.");
+    }
+
+    const targetModsDirectory = resolveVersionSpecificModsDirectory(payload.targetVersionId);
+    const fileName = sanitizeFileName(file.filename || `${payload.projectId}-${payload.versionId}.jar`);
+    const targetPath = path.join(targetModsDirectory, fileName);
+
+    sendEvent(
+      "debug",
+      `Instalando mod ${modLabel} em ${payload.targetVersionId}: ${selectedVersion.version_number || selectedVersion.id}`
+    );
+
+    await downloadFileWithCandidates(
+      file.url,
+      targetPath,
+      "classes-custom",
+      fileName
+    );
+
+    if (file?.hashes?.sha1) {
+      const downloadedHash = await sha1File(targetPath);
+      if (downloadedHash !== file.hashes.sha1) {
+        if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+        throw new Error(`Falha de integridade no mod ${fileName}.`);
+      }
+    }
+
+    sendEvent("success", `${modLabel} instalado em ${payload.targetVersionId}.`);
+    return {
+      ok: true,
+      projectId: payload.projectId,
+      versionId: payload.versionId,
+      targetVersionId: payload.targetVersionId,
+      fileName,
+      path: targetPath,
+    };
+  } catch (error) {
+    sendEvent("error", error.message || String(error));
+    throw error;
+  } finally {
+    busy = false;
   }
 }
 
@@ -5143,6 +5461,403 @@ function copyMissingInstanceContent(sourcePath, targetPath) {
   return 1;
 }
 
+function normalizeModsRelativePath(relativePath) {
+  const normalized = path.normalize(String(relativePath || "").trim().replace(/[\\/]+/g, path.sep));
+
+  if (!normalized || normalized === ".") {
+    throw new Error("Arquivo de mods invalido.");
+  }
+
+  if (path.isAbsolute(normalized) || normalized.startsWith(`..${path.sep}`) || normalized === "..") {
+    throw new Error("Caminho fora da pasta de mods.");
+  }
+
+  return normalized;
+}
+
+function ensurePathInsideRoot(rootPath, targetPath) {
+  const resolvedRoot = path.resolve(rootPath);
+  const resolvedTarget = path.resolve(targetPath);
+
+  if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+    throw new Error("Acesso fora da pasta de mods bloqueado.");
+  }
+
+  return resolvedTarget;
+}
+
+function readFileChunk(filePath, maxBytes = MOD_EDITOR_BINARY_SAMPLE_BYTES) {
+  const handle = fs.openSync(filePath, "r");
+
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const bytesRead = fs.readSync(handle, buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
+function isLikelyBinaryBuffer(buffer) {
+  if (!buffer || !buffer.length) return false;
+
+  let suspiciousBytes = 0;
+  for (const byte of buffer) {
+    if (byte === 0) return true;
+    if (byte < 7 || (byte > 14 && byte < 32)) {
+      suspiciousBytes += 1;
+    }
+  }
+
+  return suspiciousBytes / buffer.length > 0.18;
+}
+
+function isEditableModsFile(filePath, stats = null) {
+  const resolvedStats = stats || fs.statSync(filePath);
+  if (!resolvedStats.isFile()) return false;
+  if (resolvedStats.size > MAX_MOD_EDITOR_FILE_BYTES) return false;
+
+  try {
+    return !isLikelyBinaryBuffer(readFileChunk(filePath));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function buildLocalVersionRecord(versionId) {
+  return localVersionFromDirectory({
+    isDirectory: () => true,
+    name: versionId,
+  });
+}
+
+function resolveLocalVersionChainBaseRecord(versionId, versionJson = null) {
+  const normalizedId = String(versionId || "").trim();
+  if (!normalizedId) return null;
+
+  const localJson = versionJson || readJson(getLocalVersionJsonPath(normalizedId), null);
+  const localVersion = buildLocalVersionRecord(normalizedId) || {
+    id: normalizedId,
+    local: true,
+    installed: true,
+  };
+
+  return {
+    ...localVersion,
+    id: normalizedId,
+    local: true,
+    installed: true,
+    type: localJson?.type || localVersion.type || "local",
+    loaderType: localJson?.loaderType || localVersion.loaderType || null,
+    loaderVersion: localJson?.loaderVersion || localVersion.loaderVersion || "",
+    inheritsFrom: localJson?.inheritsFrom || localVersion.inheritsFrom || null,
+  };
+}
+
+function resolveModsWorkspace(versionId) {
+  const normalizedId = String(versionId || "").trim();
+  if (!normalizedId) {
+    throw new Error("Versao invalida para abrir mods.");
+  }
+
+  const versionRoot = versionDirectory(normalizedId);
+  if (!fs.existsSync(versionRoot) || !fs.statSync(versionRoot).isDirectory()) {
+    throw new Error(`A versao ${normalizedId} nao foi encontrada.`);
+  }
+
+  const version = buildLocalVersionRecord(normalizedId) || {
+    id: normalizedId,
+    local: true,
+    installed: true,
+  };
+  const localJson = readJson(getLocalVersionJsonPath(normalizedId), null);
+  const gameDirectoryInfo = versionGameDirectory(normalizedId, version, localJson);
+
+  let modsRoot = gameDirectoryInfo?.versionModsDirectory || path.join(versionRoot, "mods");
+  let usingFallbackRoot = false;
+
+  if (
+    gameDirectoryInfo?.useRootModsFallback &&
+    gameDirectoryInfo.rootModsDirectory &&
+    directoryHasFiles(gameDirectoryInfo.rootModsDirectory)
+  ) {
+    modsRoot = gameDirectoryInfo.rootModsDirectory;
+    usingFallbackRoot = true;
+  }
+
+  fs.mkdirSync(modsRoot, { recursive: true });
+
+  return {
+    versionId: normalizedId,
+    rootPath: path.resolve(modsRoot),
+    usingFallbackRoot,
+  };
+}
+
+function resolveVersionSpecificModsDirectory(versionId) {
+  const normalizedId = String(versionId || "").trim();
+  if (!normalizedId) {
+    throw new Error("Versao invalida para instalar mods.");
+  }
+
+  const versionRoot = versionDirectory(normalizedId);
+  if (!fs.existsSync(versionRoot) || !fs.statSync(versionRoot).isDirectory()) {
+    throw new Error(`A versao ${normalizedId} nao foi encontrada.`);
+  }
+
+  const version = buildLocalVersionRecord(normalizedId) || {
+    id: normalizedId,
+    local: true,
+    installed: true,
+  };
+  const localJson = readJson(getLocalVersionJsonPath(normalizedId), null);
+  const gameDirectoryInfo = versionGameDirectory(normalizedId, version, localJson);
+  const modsRoot = gameDirectoryInfo?.versionModsDirectory || path.join(versionRoot, "mods");
+
+  fs.mkdirSync(modsRoot, { recursive: true });
+  return path.resolve(modsRoot);
+}
+
+function walkDirectoryFiles(rootPath, limit = MAX_MOD_EDITOR_LISTING) {
+  const files = [];
+  const queue = [rootPath];
+
+  while (queue.length) {
+    const currentDirectory = queue.shift();
+    const children = safeReadDirectory(currentDirectory).sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true })
+    );
+
+    for (const entry of children) {
+      const fullPath = path.join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(fullPath);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+      files.push(fullPath);
+      if (files.length >= limit) {
+        return { files, truncated: true };
+      }
+    }
+  }
+
+  return { files, truncated: false };
+}
+
+function normalizeLaunchModEntry(rootPath, fullPath) {
+  const stats = fs.statSync(fullPath);
+  const relativePath = path.relative(rootPath, fullPath).split(path.sep).join("/");
+  const lowerName = path.basename(fullPath).toLowerCase();
+  const enabled = !lowerName.endsWith(".disabled");
+  const displayName = enabled ? path.basename(fullPath) : path.basename(fullPath).replace(/\.disabled$/i, "");
+
+  return {
+    relativePath,
+    displayName,
+    enabled,
+    size: stats.size,
+    modifiedAt: stats.mtime.toISOString(),
+  };
+}
+
+function listLaunchMods(payload) {
+  const workspace = resolveModsWorkspace(payload?.versionId);
+  const walked = walkDirectoryFiles(workspace.rootPath);
+  const entries = walked.files
+    .filter((filePath) => /\.jar(?:\.disabled)?$/i.test(path.basename(filePath)))
+    .map((filePath) => normalizeLaunchModEntry(workspace.rootPath, filePath));
+
+  return {
+    rootPath: workspace.rootPath,
+    usingFallbackRoot: workspace.usingFallbackRoot,
+    truncated: walked.truncated,
+    entries,
+  };
+}
+
+function toggleLaunchMod(payload) {
+  const workspace = resolveModsWorkspace(payload?.versionId);
+  const relativePath = normalizeModsRelativePath(payload?.relativePath);
+  const sourcePath = ensurePathInsideRoot(workspace.rootPath, path.join(workspace.rootPath, relativePath));
+
+  if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+    throw new Error("Mod nao encontrado.");
+  }
+
+  const sourceName = path.basename(sourcePath);
+  if (!/\.jar(?:\.disabled)?$/i.test(sourceName)) {
+    throw new Error("Somente arquivos .jar podem ser ativados ou desativados.");
+  }
+
+  const wantEnabled = Boolean(payload?.enabled);
+  const isEnabled = !sourceName.toLowerCase().endsWith(".disabled");
+  if (isEnabled === wantEnabled) {
+    return normalizeLaunchModEntry(workspace.rootPath, sourcePath);
+  }
+
+  const targetName = wantEnabled
+    ? sourceName.replace(/\.disabled$/i, "")
+    : `${sourceName}.disabled`;
+  const targetPath = ensurePathInsideRoot(workspace.rootPath, path.join(path.dirname(sourcePath), targetName));
+
+  if (fs.existsSync(targetPath)) {
+    throw new Error("Ja existe um arquivo com o nome de destino para esse mod.");
+  }
+
+  fs.renameSync(sourcePath, targetPath);
+  return normalizeLaunchModEntry(workspace.rootPath, targetPath);
+}
+
+function toggleModpackFileActive(payload) {
+  const workspace = resolveModsWorkspace(payload?.versionId);
+  const relativePath = normalizeModsRelativePath(payload?.relativePath);
+  const sourcePath = ensurePathInsideRoot(workspace.rootPath, path.join(workspace.rootPath, relativePath));
+
+  if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+    throw new Error("Mod nao encontrado.");
+  }
+
+  const sourceName = path.basename(sourcePath);
+  if (!/\.jar(?:\.desactived)?$/i.test(sourceName)) {
+    throw new Error("Somente arquivos .jar podem ser ativados ou desativados.");
+  }
+
+  const wantEnabled = Boolean(payload?.enabled);
+  const isEnabled = !sourceName.toLowerCase().endsWith(".desactived");
+  if (isEnabled === wantEnabled) {
+    return { relativePath };
+  }
+
+  const targetName = wantEnabled
+    ? sourceName.replace(/\.desactived$/i, "")
+    : `${sourceName}.desactived`;
+  const targetPath = ensurePathInsideRoot(workspace.rootPath, path.join(path.dirname(sourcePath), targetName));
+
+  if (fs.existsSync(targetPath)) {
+    throw new Error("Ja existe um arquivo com o nome de destino para esse mod.");
+  }
+
+  fs.renameSync(sourcePath, targetPath);
+  const stats = fs.statSync(targetPath);
+
+  return {
+    relativePath: path.relative(workspace.rootPath, targetPath).split(path.sep).join("/"),
+    name: path.basename(targetPath),
+    size: stats.size,
+    modifiedAt: stats.mtime.toISOString(),
+  };
+}
+
+function listModsFiles(payload) {
+  const workspace = resolveModsWorkspace(payload?.versionId);
+  const entries = [];
+  const queue = [workspace.rootPath];
+
+  while (queue.length) {
+    const currentDirectory = queue.shift();
+    const children = safeReadDirectory(currentDirectory).sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true })
+    );
+
+    for (const entry of children) {
+      const fullPath = path.join(currentDirectory, entry.name);
+      const relativePath = path
+        .relative(workspace.rootPath, fullPath)
+        .split(path.sep)
+        .join("/");
+
+      if (entry.isDirectory()) {
+        queue.push(fullPath);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+
+      const stats = fs.statSync(fullPath);
+      entries.push({
+        name: entry.name,
+        relativePath,
+        size: stats.size,
+        modifiedAt: stats.mtime.toISOString(),
+        editable: isEditableModsFile(fullPath, stats),
+      });
+
+      if (entries.length >= MAX_MOD_EDITOR_LISTING) {
+        return {
+          rootPath: workspace.rootPath,
+          usingFallbackRoot: workspace.usingFallbackRoot,
+          truncated: true,
+          entries,
+        };
+      }
+    }
+  }
+
+  return {
+    rootPath: workspace.rootPath,
+    usingFallbackRoot: workspace.usingFallbackRoot,
+    truncated: false,
+    entries,
+  };
+}
+
+function readModsFile(payload) {
+  const workspace = resolveModsWorkspace(payload?.versionId);
+  const relativePath = normalizeModsRelativePath(payload?.relativePath);
+  const filePath = ensurePathInsideRoot(workspace.rootPath, path.join(workspace.rootPath, relativePath));
+
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error("Arquivo de mods nao encontrado.");
+  }
+
+  const stats = fs.statSync(filePath);
+  if (!isEditableModsFile(filePath, stats)) {
+    throw new Error("Esse arquivo parece binario ou grande demais para editar aqui.");
+  }
+
+  return {
+    rootPath: workspace.rootPath,
+    relativePath: relativePath.split(path.sep).join("/"),
+    content: fs.readFileSync(filePath, "utf8"),
+    size: stats.size,
+    modifiedAt: stats.mtime.toISOString(),
+  };
+}
+
+function writeModsFile(payload) {
+  const workspace = resolveModsWorkspace(payload?.versionId);
+  const relativePath = normalizeModsRelativePath(payload?.relativePath);
+  const filePath = ensurePathInsideRoot(workspace.rootPath, path.join(workspace.rootPath, relativePath));
+
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error("Arquivo de mods nao encontrado.");
+  }
+
+  const currentStats = fs.statSync(filePath);
+  if (!isEditableModsFile(filePath, currentStats)) {
+    throw new Error("Esse arquivo nao pode ser editado pelo launcher.");
+  }
+
+  const nextContent = typeof payload?.content === "string" ? payload.content : "";
+  const nextSize = Buffer.byteLength(nextContent, "utf8");
+
+  if (nextSize > MAX_MOD_EDITOR_FILE_BYTES) {
+    throw new Error("Arquivo muito grande para salvar pelo launcher.");
+  }
+
+  fs.writeFileSync(filePath, nextContent, "utf8");
+  const stats = fs.statSync(filePath);
+
+  return {
+    rootPath: workspace.rootPath,
+    relativePath: relativePath.split(path.sep).join("/"),
+    size: stats.size,
+    modifiedAt: stats.mtime.toISOString(),
+  };
+}
+
 function inferVersionLoaderType(version = null, versionJson = null) {
   const explicitLoader = String(
     version?.loaderType || versionJson?.loaderType || ""
@@ -5327,6 +6042,7 @@ function normalizeManifest(manifest) {
       installed: isVersionInstalled(version.id),
       local: false,
       inheritsFrom: null,
+      hasVersionMods: false,
     });
   }
 
@@ -5343,6 +6059,7 @@ function normalizeManifest(manifest) {
         (localVersion.inheritsFrom ? "custom" : "local"),
       releaseTime: existing?.releaseTime || localVersion.releaseTime,
       time: existing?.time || localVersion.time,
+      hasVersionMods: Boolean(localVersion.hasVersionMods),
     });
   }
 
@@ -5626,17 +6343,57 @@ async function ensureVersionFiles(version) {
       }
     }
     const explicitBaseId = localJson.inheritsFrom || localJson.jar || null;
+    const explicitBaseLocalJson = explicitBaseId
+      ? readJson(getLocalVersionJsonPath(explicitBaseId), null)
+      : null;
     const selfContainedLocalVersion = isSelfContainedLocalVersion(
       normalizedLocalJson,
       localJarPath
     );
     const baseMeta = explicitBaseId
-      ? await resolveOfficialVersionMeta(explicitBaseId)
+      ? explicitBaseLocalJson
+        ? null
+        : await resolveOfficialVersionMeta(explicitBaseId)
       : selfContainedLocalVersion
         ? null
       : await resolveFirstOfficialVersionMeta(
           localBaseVersionCandidates(version.id, normalizedLocalJson)
         );
+
+    if (explicitBaseId && explicitBaseLocalJson) {
+      const baseVersion = resolveLocalVersionChainBaseRecord(explicitBaseId, explicitBaseLocalJson);
+      const preparedBase = await ensureVersionFiles(baseVersion);
+      const baseLaunchJson = readJson(preparedBase.launchJsonPath || getLocalVersionJsonPath(explicitBaseId), null);
+
+      if (!baseLaunchJson) {
+        throw new Error(`Versao base local ${explicitBaseId} sem JSON valido para launch.`);
+      }
+
+      const launchJson = mergeInheritedVersion(baseLaunchJson, normalizedLocalJson);
+      ensureLocalForgeLibraries(version.id, launchJson);
+      await ensureLocalLaunchLibraries(version.id, launchJson);
+      const launchJsonFile = writeNormalizedLaunchJson(version.id, launchJson);
+      const launchTargets = resolveLaunchTargets(
+        version,
+        launchJson,
+        version.id,
+        localJarPath || preparedBase.minecraftJar
+      );
+
+      return {
+        ...version,
+        type: localJson.type || version.type || "custom",
+        launchNumber: version.id,
+        custom: null,
+        inheritsFrom: preparedBase.inheritsFrom || explicitBaseId,
+        javaVersion: launchJson.javaVersion || preparedBase.javaVersion || null,
+        launchJsonPath: launchJsonFile,
+        minecraftJar: launchTargets.minecraftJar,
+        classes: launchTargets.classes,
+        gameDirectory,
+        extraJvmArgs: extractJvmArgs(normalizedLocalJson, version.id),
+      };
+    }
 
     if (selfContainedLocalVersion) {
       sendEvent(
@@ -6138,6 +6895,16 @@ app.whenReady().then(() => {
   ipcMain.handle("modpacks:search", (_event, query, filters) => searchModpacks(query, filters || {}));
   ipcMain.handle("modpacks:versions", (_event, projectId) => getModpackVersions(projectId));
   ipcMain.handle("modpacks:install", (_event, payload) => installModpack(payload));
+  ipcMain.handle("modpacks:createCustom", (_event, payload) => createCustomModpack(payload));
+  ipcMain.handle("mods:search", (_event, query, filters) => searchMods(query, filters || {}));
+  ipcMain.handle("mods:versions", (_event, projectId) => getModVersions(projectId));
+  ipcMain.handle("mods:install", (_event, payload) => installMod(payload));
+  ipcMain.handle("mods:listFiles", (_event, payload) => listModsFiles(payload));
+  ipcMain.handle("mods:readFile", (_event, payload) => readModsFile(payload));
+  ipcMain.handle("mods:writeFile", (_event, payload) => writeModsFile(payload));
+  ipcMain.handle("mods:toggleModpackFileActive", (_event, payload) => toggleModpackFileActive(payload));
+  ipcMain.handle("mods:listLaunchMods", (_event, payload) => listLaunchMods(payload));
+  ipcMain.handle("mods:toggleLaunchMod", (_event, payload) => toggleLaunchMod(payload));
   ipcMain.handle("account:add", async () => {
     try {
       return await addMicrosoftAccount();

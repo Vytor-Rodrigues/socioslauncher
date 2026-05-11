@@ -121,6 +121,7 @@
               <option value="optifine">OptiFine</option>
               <option value="forgeoptifine">ForgeOptiFine</option>
             </select>
+            <button id="create-modpack-button" class="primary hidden" type="button">Criar modpack</button>
             <button id="refresh-versions" class="secondary">Atualizar</button>
           </div>
         </section>
@@ -130,8 +131,11 @@
             <div class="version-panel-header" style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; align-items: center; position: relative;">
               <div id="modpack-subtabs" class="subtab-row hidden" style="margin-bottom: 0; display: flex; gap: 10px;">
                 <button id="modpacks-search-tab" class="nav-button active" type="button">
-                  Pesquise
+                  Modpacks
                 </button>
+                <!-- <button id="catalog-mods-tab" class="nav-button" type="button">
+                  Mods
+                </button> -->
                 <button id="modpacks-downloaded-tab" class="nav-button" type="button">
                   Baixados
                 </button>
@@ -350,6 +354,21 @@
                 Desinstalar
               </button>
             </div>
+            <section id="launch-mods-panel" class="launch-mods hidden">
+              <div class="mods-editor-header">
+                <div>
+                  <strong>Mods para iniciar</strong>
+                  <small id="launch-mods-root-label">Ative ou desative os mods desta versão antes de jogar.</small>
+                </div>
+                <div class="mods-editor-actions">
+                  <button id="launch-mods-refresh" class="ghost small-button" type="button">Atualizar</button>
+                </div>
+              </div>
+              <div id="launch-mods-list" class="launch-mods-list"></div>
+            </section>
+            <section id="mods-editor-panel" class="mods-editor-trigger hidden">
+              <button id="open-modpack-editor" class="secondary" type="button">Editar Modpack</button>
+            </section>
             <div class="paths">
               <span>Instalacao</span>
               <code id="minecraft-path">-</code>
@@ -409,11 +428,154 @@
         </div>
 
         <div class="modal-body">
+          <label id="modpack-target-version-row" class="full-field hidden">
+            Instalar na versão
+            <select id="modpack-target-version"></select>
+          </label>
           <div id="modpack-version-list" class="modpack-version-list"></div>
         </div>
 
         <div class="modal-actions">
           <button id="cancel-modpack-version" class="ghost" type="button">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="modpack-editor-modal" class="modal-backdrop hidden" aria-hidden="true">
+      <div class="modal-card modal-card-editor" role="dialog" aria-modal="true" aria-labelledby="modpack-editor-title">
+        <div class="modal-header">
+          <div>
+            <h3 id="modpack-editor-title">Editar Modpack</h3>
+            <p id="mods-root-label">Selecione um mod do modpack para editar ou desativar.</p>
+          </div>
+          <button id="close-modpack-editor" class="ghost icon-button" type="button" aria-label="Fechar editor do modpack">
+            ×
+          </button>
+        </div>
+
+        <div class="modal-body modpack-editor-body">
+          <div class="mods-editor-actions modal-toolbar">
+            <button id="mods-refresh" class="ghost small-button" type="button">Atualizar</button>
+            <button id="open-add-mod-modal" class="secondary small-button" type="button">Adicionar mod</button>
+            <button id="mods-save" class="primary small-button" type="button" disabled>Salvar</button>
+          </div>
+
+          <div class="mods-editor-layout modal-mods-layout">
+            <div id="mods-file-list" class="mods-file-list"></div>
+            <div class="mods-file-editor">
+              <div class="mods-file-meta">
+                <strong id="mods-selected-file">Nenhum arquivo selecionado</strong>
+                <small id="mods-file-status">Escolha um arquivo de texto para editar.</small>
+              </div>
+              <textarea
+                id="mods-file-content"
+                class="mods-file-textarea"
+                spellcheck="false"
+                placeholder="Selecione um arquivo da lista para editar aqui."
+                disabled
+              ></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="add-mod-modal" class="modal-backdrop hidden" aria-hidden="true">
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="add-mod-title">
+        <div class="modal-header">
+          <div>
+            <h3 id="add-mod-title">Adicionar mod</h3>
+            <p>Pesquise mods no Modrinth para adicionar na pasta do modpack.</p>
+          </div>
+          <button id="close-add-mod-modal" class="ghost icon-button" type="button" aria-label="Fechar popup de adicionar mod">
+            ×
+          </button>
+        </div>
+
+        <div class="modal-body add-mod-body">
+          <div class="search-row add-mod-search-row">
+            <input id="add-mod-search" type="search" autocomplete="off" placeholder="Pesquisar mods..." />
+          </div>
+          <div id="add-mod-results" class="add-mod-results"></div>
+        </div>
+
+        <div class="modal-actions">
+          <button id="cancel-add-mod-modal" class="ghost" type="button">Fechar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="create-modpack-modal" class="modal-backdrop hidden" aria-hidden="true">
+      <div class="modal-card modal-card-create" role="dialog" aria-modal="true" aria-labelledby="create-modpack-title">
+        <div class="modal-header">
+          <div>
+            <h3 id="create-modpack-title">Criar modpack</h3>
+            <p id="create-modpack-subtitle">Escolha o nome, a versao do Minecraft e o loader antes de selecionar os mods.</p>
+          </div>
+          <button id="close-create-modpack-modal" class="ghost icon-button" type="button" aria-label="Fechar criacao de modpack">
+            ×
+          </button>
+        </div>
+
+        <div class="modal-body create-modpack-body">
+          <div id="create-modpack-step-setup" class="create-modpack-step">
+            <label class="full-field">
+              Nome do modpack
+              <input id="create-modpack-name" type="text" maxlength="60" autocomplete="off" placeholder="Meu Modpack" />
+            </label>
+
+            <label class="full-field">
+              Tags do modpack
+              <input id="create-modpack-tags" type="text" maxlength="120" autocomplete="off" placeholder="rpg, aventura, tech" />
+            </label>
+
+            <div class="field-grid create-modpack-grid">
+              <label>
+                Versao do Minecraft
+                <select id="create-modpack-version"></select>
+              </label>
+              <label>
+                Loader
+                <select id="create-modpack-loader"></select>
+              </label>
+            </div>
+
+            <p class="modal-hint">Clique em avancar para pesquisar e escolher os mods antes de criar o modpack.</p>
+          </div>
+
+          <div id="create-modpack-step-mods" class="create-modpack-step hidden">
+            <div class="create-modpack-summary">
+              <strong id="create-modpack-summary-title">-</strong>
+              <small id="create-modpack-summary-meta">-</small>
+            </div>
+
+            <div class="create-modpack-mods-layout">
+              <div class="create-modpack-mods-browser">
+                <div class="search-row add-mod-search-row">
+                  <input id="create-modpack-mod-search" type="search" autocomplete="off" placeholder="Pesquisar mods compativeis..." />
+                </div>
+
+                <div id="create-modpack-mod-results" class="add-mod-results"></div>
+              </div>
+
+              <aside class="create-modpack-selected-panel">
+                <div class="create-modpack-selected-bar">
+                  <span id="create-modpack-selected-count">0 mods selecionados</span>
+                  <button id="clear-create-modpack-mods" class="ghost small-button" type="button">Limpar selecao</button>
+                </div>
+
+                <div id="create-modpack-selected-list" class="create-modpack-selected-list"></div>
+              </aside>
+            </div>
+          </div>
+
+          <p id="create-modpack-error" class="modal-hint form-error hidden"></p>
+        </div>
+
+        <div class="modal-actions">
+          <button id="cancel-create-modpack" class="ghost" type="button">Cancelar</button>
+          <button id="back-create-modpack-step" class="ghost hidden" type="button">Voltar</button>
+          <button id="confirm-create-modpack" class="primary" type="button">Avancar</button>
         </div>
       </div>
     </div>
