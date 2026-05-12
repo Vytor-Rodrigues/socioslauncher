@@ -1463,6 +1463,62 @@ function createModpackSelectionFilters() {
   };
 }
 
+function normalizeModVersionTimestamp(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function modVersionMatchesFilters(version, filters = {}) {
+  const expectedGameVersion = String(filters.gameVersion || "").trim();
+  const expectedLoader = String(filters.loader || "").trim().toLowerCase();
+  const versionGameVersions = Array.isArray(version?.minecraftVersions)
+    ? version.minecraftVersions.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const versionLoaders = Array.isArray(version?.loaders)
+    ? version.loaders.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  if (expectedGameVersion && !versionGameVersions.includes(expectedGameVersion)) {
+    return false;
+  }
+
+  if (expectedLoader && !versionLoaders.includes(expectedLoader)) {
+    return false;
+  }
+
+  return true;
+}
+
+function compareModVersionsNewestFirst(left, right) {
+  const publishedDifference =
+    normalizeModVersionTimestamp(right?.publishedAt) - normalizeModVersionTimestamp(left?.publishedAt);
+  if (publishedDifference !== 0) {
+    return publishedDifference;
+  }
+
+  const featuredDifference = Number(Boolean(right?.featured)) - Number(Boolean(left?.featured));
+  if (featuredDifference !== 0) {
+    return featuredDifference;
+  }
+
+  const downloadsDifference = Number(right?.downloads || 0) - Number(left?.downloads || 0);
+  if (downloadsDifference !== 0) {
+    return downloadsDifference;
+  }
+
+  return String(right?.versionNumber || right?.name || right?.id || "").localeCompare(
+    String(left?.versionNumber || left?.name || left?.id || ""),
+    undefined,
+    { numeric: true, sensitivity: "base" }
+  );
+}
+
+function selectLatestCompatibleModVersion(versions, filters = {}) {
+  return (Array.isArray(versions) ? [...versions] : [])
+    .filter((version) => modVersionMatchesFilters(version, filters))
+    .sort(compareModVersionsNewestFirst)[0] || null;
+}
+
 function closeCreateModpackModsSearchTimer() {
   if (state.createModpackModsSearchTimer) {
     clearTimeout(state.createModpackModsSearchTimer);
@@ -1851,6 +1907,15 @@ function selectedModpackSearchFilters() {
   };
 }
 
+function selectedModpackCompatibilityLabel(filters = selectedModpackSearchFilters()) {
+  return [
+    String(filters.gameVersion || "").trim(),
+    filters.loader ? loaderDisplayName(filters.loader) : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 async function createCustomModpackFromModal() {
   if (state.createModpackLoading) return;
 
@@ -1880,10 +1945,11 @@ async function createCustomModpackFromModal() {
     });
 
     const failedMods = [];
+    const modSelectionFilters = createModpackSelectionFilters();
     for (const mod of state.createModpackSelectedMods) {
       try {
         const versions = await api.getModVersions(mod.projectId);
-        const selectedVersion = Array.isArray(versions) ? versions[0] : null;
+        const selectedVersion = selectLatestCompatibleModVersion(versions, modSelectionFilters);
         if (!selectedVersion?.id) {
           throw new Error(`Nenhuma versao compativel encontrada para ${mod.title || mod.projectId}.`);
         }
@@ -2456,20 +2522,50 @@ function queueAddModSearch() {
 async function startAddModToSelectedModpack(modProject) {
   if (!modProject?.projectId || !modsEditorVisible()) return;
 
+  const targetVersionId = String(state.selected?.id || "").trim();
+  const compatibilityFilters = selectedModpackSearchFilters();
+  if (!targetVersionId) return;
+
   state.installingModId = modProject.projectId;
   renderAddModModal();
 
   try {
     const versions = await api.getModVersions(modProject.projectId);
+    const selectedVersion = selectLatestCompatibleModVersion(versions, compatibilityFilters);
+    if (!selectedVersion?.id) {
+      const compatibilityLabel = selectedModpackCompatibilityLabel(compatibilityFilters);
+      throw new Error(
+        compatibilityLabel
+          ? `Nenhuma versao compativel de ${modProject.title || modProject.projectId} foi encontrada para ${compatibilityLabel}.`
+          : `Nenhuma versao compativel de ${modProject.title || modProject.projectId} foi encontrada para a versao selecionada.`
+      );
+    }
+
     closeAddModPopup();
-    openModVersionModal(modProject, versions, {
-      targetVersionId: state.selected.id,
-      hideTarget: true,
+    setBusy(true);
+    renderCatalog();
+
+    await api.installMod({
+      ...modProject,
+      versionId: selectedVersion.id,
+      targetVersionId,
     });
+
+    appendLog(
+      "success",
+      `${modProject.title || modProject.projectId} instalado automaticamente em ${targetVersionId}: ${selectedVersion.versionNumber || selectedVersion.name || selectedVersion.id}.`
+    );
+
+    await loadModsFiles(true);
+    if (state.activeTab === "versions" && state.selected?.id === targetVersionId) {
+      syncLaunchModsForSelection(true);
+    }
   } catch (error) {
     appendLog("error", error.message || String(error));
   } finally {
+    setBusy(false);
     state.installingModId = null;
+    renderCatalog();
     renderAddModModal();
   }
 }

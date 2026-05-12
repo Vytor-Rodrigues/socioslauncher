@@ -5595,27 +5595,7 @@ function resolveModsWorkspace(versionId) {
 }
 
 function resolveVersionSpecificModsDirectory(versionId) {
-  const normalizedId = String(versionId || "").trim();
-  if (!normalizedId) {
-    throw new Error("Versao invalida para instalar mods.");
-  }
-
-  const versionRoot = versionDirectory(normalizedId);
-  if (!fs.existsSync(versionRoot) || !fs.statSync(versionRoot).isDirectory()) {
-    throw new Error(`A versao ${normalizedId} nao foi encontrada.`);
-  }
-
-  const version = buildLocalVersionRecord(normalizedId) || {
-    id: normalizedId,
-    local: true,
-    installed: true,
-  };
-  const localJson = readJson(getLocalVersionJsonPath(normalizedId), null);
-  const gameDirectoryInfo = versionGameDirectory(normalizedId, version, localJson);
-  const modsRoot = gameDirectoryInfo?.versionModsDirectory || path.join(versionRoot, "mods");
-
-  fs.mkdirSync(modsRoot, { recursive: true });
-  return path.resolve(modsRoot);
+  return resolveModsWorkspace(versionId).rootPath;
 }
 
 function walkDirectoryFiles(rootPath, limit = MAX_MOD_EDITOR_LISTING) {
