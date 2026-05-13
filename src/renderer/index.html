@@ -95,12 +95,29 @@
 
       <main class="content">
         <section class="topbar">
-          <div>
-            <h2 id="topbar-title">Versões</h2>
-            <p id="latest-line">Carregando manifesto...</p>
+          <div style="display: flex; gap: 24px; align-items: center;">
+            <div>
+              <h2 id="topbar-title">Versões</h2>
+              <p id="latest-line">Carregando manifesto...</p>
+            </div>
+
+            <div class="top-actions">
+              <select id="version-filter" aria-label="Filtro de versoes">
+                <option value="installed">Instaladas</option>
+                <option value="release">Releases</option>
+                <option value="snapshot">Snapshots</option>
+                <option value="fabric">Fabric</option>
+                <option value="forge">Forge</option>
+                <option value="neoforge">NeoForge</option>
+                <option value="optifine">OptiFine</option>
+                <option value="forgeoptifine">ForgeOptiFine</option>
+              </select>
+              <button id="create-modpack-button" class="primary hidden" type="button">Criar modpack</button>
+              <button id="refresh-versions" class="secondary">Atualizar</button>
+            </div>
           </div>
           
-          <div id="top-progress-box" class="progress-box idle" style="flex: 1; max-width: 400px; margin: 0 20px;">
+          <div id="top-progress-box" class="progress-box idle" style="flex: 1; max-width: 400px; margin-left: auto;">
             <div class="progress-header">
               <span id="top-progress-label">Aguardando</span>
               <span id="top-progress-percent">0%</span>
@@ -108,21 +125,6 @@
             <div class="progress-track">
               <div id="top-progress-bar" class="progress-bar"></div>
             </div>
-          </div>
-
-          <div class="top-actions">
-            <select id="version-filter" aria-label="Filtro de versoes">
-              <option value="installed">Instaladas</option>
-              <option value="release">Releases</option>
-              <option value="snapshot">Snapshots</option>
-              <option value="fabric">Fabric</option>
-              <option value="forge">Forge</option>
-              <option value="neoforge">NeoForge</option>
-              <option value="optifine">OptiFine</option>
-              <option value="forgeoptifine">ForgeOptiFine</option>
-            </select>
-            <button id="create-modpack-button" class="primary hidden" type="button">Criar modpack</button>
-            <button id="refresh-versions" class="secondary">Atualizar</button>
           </div>
         </section>
 
@@ -457,24 +459,10 @@
           <div class="mods-editor-actions modal-toolbar">
             <button id="mods-refresh" class="ghost small-button" type="button">Atualizar</button>
             <button id="open-add-mod-modal" class="secondary small-button" type="button">Adicionar mod</button>
-            <button id="mods-save" class="primary small-button" type="button" disabled>Salvar</button>
           </div>
 
           <div class="mods-editor-layout modal-mods-layout">
             <div id="mods-file-list" class="mods-file-list"></div>
-            <div class="mods-file-editor">
-              <div class="mods-file-meta">
-                <strong id="mods-selected-file">Nenhum arquivo selecionado</strong>
-                <small id="mods-file-status">Escolha um arquivo de texto para editar.</small>
-              </div>
-              <textarea
-                id="mods-file-content"
-                class="mods-file-textarea"
-                spellcheck="false"
-                placeholder="Selecione um arquivo da lista para editar aqui."
-                disabled
-              ></textarea>
-            </div>
           </div>
         </div>
       </div>

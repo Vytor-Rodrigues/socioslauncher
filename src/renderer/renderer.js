@@ -1734,6 +1734,7 @@ function renderCreateModpackModal() {
   }
 
   if (elements.createModpackSelectedList) {
+    const selectedScrollTop = elements.createModpackSelectedList.scrollTop;
     elements.createModpackSelectedList.innerHTML = "";
 
     if (!state.createModpackSelectedMods.length) {
@@ -1765,9 +1766,11 @@ function renderCreateModpackModal() {
       });
       elements.createModpackSelectedList.appendChild(fragment);
     }
+    elements.createModpackSelectedList.scrollTop = selectedScrollTop;
   }
 
   if (elements.createModpackModResults) {
+    const resultsScrollTop = elements.createModpackModResults.scrollTop;
     elements.createModpackModResults.innerHTML = "";
 
     if (state.createModpackModsLoading) {
@@ -1816,6 +1819,7 @@ function renderCreateModpackModal() {
       });
       elements.createModpackModResults.appendChild(fragment);
     }
+    elements.createModpackModResults.scrollTop = resultsScrollTop;
   }
 
   if (elements.createModpackError) {
@@ -2117,8 +2121,7 @@ function renderModsEditor(forceTextareaSync = false) {
       const fragment = document.createDocumentFragment();
 
       state.modsEntries.forEach((entry) => {
-        const button = document.createElement("button");
-        button.type = "button";
+        const button = document.createElement("div");
         button.className = "mods-file-item";
         if (entry.relativePath === state.modsSelectedPath) {
           button.classList.add("selected");
@@ -2138,10 +2141,6 @@ function renderModsEditor(forceTextareaSync = false) {
             <span>${escapeHtml(meta.join(" • "))}</span>
           </span>
         `;
-
-        button.addEventListener("click", () => {
-          openModsFileEntry(entry);
-        });
 
         if (isToggleableModpackEntry(entry)) {
           const toggle = document.createElement("button");
@@ -2247,6 +2246,10 @@ async function loadModsFiles(forceReload = false) {
     state.modsUsingFallbackRoot = Boolean(response?.usingFallbackRoot);
     state.modsTruncated = Boolean(response?.truncated);
     state.modsLoadedVersionId = versionId;
+
+    if (forceReload) {
+      appendLog("success", "Lista de mods atualizada.");
+    }
 
     if (!state.modsEntries.some((entry) => entry.relativePath === state.modsSelectedPath)) {
       resetModsFileSelection();
@@ -2410,6 +2413,8 @@ async function toggleSelectedModpackMod(entry = null) {
 function renderAddModModal() {
   if (!elements.addModModal || !elements.addModResults) return;
 
+  if (!state.sessionInstalledMods) state.sessionInstalledMods = new Set();
+
   const visible = state.addModModalOpen && modsEditorVisible() && state.modpackEditorOpen;
   elements.addModModal.classList.toggle("hidden", !visible);
   elements.addModModal.setAttribute("aria-hidden", visible ? "false" : "true");
@@ -2420,6 +2425,7 @@ function renderAddModModal() {
     elements.addModSearch.value = state.addModQuery;
   }
 
+  const addModScrollTop = elements.addModResults.scrollTop || 0;
   elements.addModResults.innerHTML = "";
 
   if (state.addModLoading) {
@@ -2445,12 +2451,22 @@ function renderAddModModal() {
     const card = document.createElement("article");
     card.className = "modpack-item";
 
+    const isInstalled = state.sessionInstalledMods.has(mod.projectId);
     const button = document.createElement("button");
-    button.className = "secondary";
+    button.className = isInstalled ? "primary" : "secondary";
     button.type = "button";
-    button.textContent = state.installingModId === mod.projectId ? "Adicionando..." : "Adicionar";
-    button.disabled = state.busy || state.installingModId === mod.projectId;
-    button.addEventListener("click", () => startAddModToSelectedModpack(mod));
+
+    if (state.installingModId === mod.projectId) {
+      button.textContent = "Adicionando...";
+      button.disabled = true;
+    } else if (isInstalled) {
+      button.textContent = "Instalado";
+      button.disabled = true;
+    } else {
+      button.textContent = "Adicionar";
+      button.disabled = state.busy;
+      button.addEventListener("click", () => startAddModToSelectedModpack(mod));
+    }
 
     card.innerHTML = `
       ${
@@ -2470,6 +2486,7 @@ function renderAddModModal() {
   });
 
   elements.addModResults.appendChild(fragment);
+  elements.addModResults.scrollTop = addModScrollTop;
 }
 
 function openAddModPopup() {
@@ -2541,15 +2558,18 @@ async function startAddModToSelectedModpack(modProject) {
       );
     }
 
-    closeAddModPopup();
     setBusy(true);
     renderCatalog();
+    setProgress(`Adicionando Mod: ${modProject.title || modProject.projectId}`, 0, "download");
 
     await api.installMod({
       ...modProject,
       versionId: selectedVersion.id,
       targetVersionId,
     });
+
+    if (!state.sessionInstalledMods) state.sessionInstalledMods = new Set();
+    state.sessionInstalledMods.add(modProject.projectId);
 
     appendLog(
       "success",
@@ -2563,6 +2583,7 @@ async function startAddModToSelectedModpack(modProject) {
   } catch (error) {
     appendLog("error", error.message || String(error));
   } finally {
+    scheduleProgressClear(2000);
     setBusy(false);
     state.installingModId = null;
     renderCatalog();
