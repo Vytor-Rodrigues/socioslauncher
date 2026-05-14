@@ -44,17 +44,67 @@ function setIdleRPC() {
   }).catch(console.error);
 }
 
-function setPlayingRPC(version, server) {
+function setPlayingRPC(mcVersion, server, modpackName) {
   if (!rpcReady || !rpc) return;
-  const stateStr = server ? `Jogando em: ${server}` : "Jogando Singleplayer";
+  // Extract only the numeric minecraft version (e.g. "1.8.9") from any string
+  const verMatch = String(mcVersion || "").match(/\d+\.\d+(?:\.\d+)?/);
+  const displayVersion = verMatch ? verMatch[0] : (mcVersion || "?");
+  const details = modpackName ? modpackName : `Versão: ${displayVersion}`;
+  // Strip port from IP (e.g. "mush.com.br:25565" → "mush.com.br")
+  const cleanIp = server ? String(server).replace(/:\d+$/, "") : null;
+  const stateStr = cleanIp ? `Em servidor: ${cleanIp}` : "Singleplayer";
+
   rpc.setActivity({
-    details: `Versão: ${version}`,
+    details,
     state: stateStr,
     largeImageKey: "logosocios",
     largeImageText: "Socios Client",
     startTimestamp: new Date(),
     instance: false,
   }).catch(console.error);
+}
+
+function setLoadingRPC(mcVersion, modpackName) {
+  if (!rpcReady || !rpc) return;
+  const verMatch = String(mcVersion || "").match(/\d+\.\d+(?:\.\d+)?/);
+  const displayVersion = verMatch ? verMatch[0] : (mcVersion || "?");
+  const details = modpackName ? modpackName : `Versão: ${displayVersion}`;
+
+  rpc.setActivity({
+    details,
+    state: "Em idle",
+    largeImageKey: "logosocios",
+    largeImageText: "Socios Client",
+    instance: false,
+  }).catch(console.error);
+}
+
+// Helper: strip non-common alphabet chars from a string (keep letters, digits, spaces, punctuation)
+function cleanDescription(text) {
+  if (!text) return "";
+  // Remove emoji, special unicode, control chars — keep ASCII printable range + accented latin
+  return text
+    .replace(/[^\x20-\x7E\u00C0-\u024F]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// Helper: translate text to PT-BR using Google Translate unofficial endpoint (no key needed)
+async function translateToPtBr(text) {
+  if (!text) return text;
+  try {
+    const encoded = encodeURIComponent(text);
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=pt&dt=t&q=${encoded}`;
+    const res = await fetch(url, { headers: { "User-Agent": HTTP_USER_AGENT } });
+    if (!res.ok) return text;
+    const data = await res.json();
+    if (Array.isArray(data) && Array.isArray(data[0])) {
+      return data[0].map((s) => (Array.isArray(s) ? s[0] : "")).join("").trim() || text;
+    }
+    return text;
+  } catch (_) {
+    return text;
+  }
 }
 
 const VERSION_MANIFEST_URL =
@@ -3308,10 +3358,11 @@ async function fetchJson(url, label) {
   return response.json();
 }
 
-function searchModpacksUrl(query, filters = {}, limit = 24) {
+function searchModpacksUrl(query, filters = {}, limit = 24, offset = 0) {
   const url = new URL(`${MODRINTH_API_ROOT}/search`);
   const normalizedQuery = String(query || "").trim();
-  url.searchParams.set("limit", String(Math.min(50, Math.max(1, Number(limit) || 24))));
+  url.searchParams.set("limit", String(Math.min(100, Math.max(1, Number(limit) || 24))));
+  url.searchParams.set("offset", String(Math.max(0, Number(offset) || 0)));
   url.searchParams.set("index", normalizedQuery ? "relevance" : "downloads");
 
   // Build facets: always filter by project_type:modpack, then optionally by loader, game_version and genre
@@ -3350,29 +3401,41 @@ function searchModsUrl(query, filters = {}, limit = 24) {
   return url.toString();
 }
 
-async function searchModpacks(query, filters = {}, limit = 24) {
-  const result = await fetchJson(searchModpacksUrl(query, filters, limit), "Modrinth search");
+async function searchModpacks(query, filters = {}, limit = 24, offset = 0) {
+  const result = await fetchJson(searchModpacksUrl(query, filters, limit, offset), "Modrinth search");
   const hits = Array.isArray(result?.hits) ? result.hits : [];
 
+  // Map hits and clean+translate descriptions in parallel
+  const mappedHits = hits.map((hit) => ({
+    projectId: hit.project_id,
+    slug: hit.slug || hit.project_id,
+    title: hit.title || hit.name || hit.project_id,
+    description: cleanDescription(hit.description || hit.summary || ""),
+    author: hit.author || "",
+    iconUrl: hit.icon_url || "",
+    downloads: Number(hit.downloads) || 0,
+    follows: Number(hit.follows) || 0,
+    latestVersion: hit.latest_version || "",
+    gameVersions: Array.isArray(hit.versions) ? hit.versions : [],
+    categories:
+      Array.isArray(hit.display_categories) && hit.display_categories.length
+        ? hit.display_categories
+        : Array.isArray(hit.categories)
+          ? hit.categories
+          : [],
+  }));
+
+  // Translate descriptions in parallel (max batch to avoid throttling)
+  await Promise.all(
+    mappedHits.map(async (hit) => {
+      if (hit.description) {
+        hit.description = await translateToPtBr(hit.description);
+      }
+    })
+  );
+
   return {
-    hits: hits.map((hit) => ({
-      projectId: hit.project_id,
-      slug: hit.slug || hit.project_id,
-      title: hit.title || hit.name || hit.project_id,
-      description: hit.description || hit.summary || "",
-      author: hit.author || "",
-      iconUrl: hit.icon_url || "",
-      downloads: Number(hit.downloads) || 0,
-      follows: Number(hit.follows) || 0,
-      latestVersion: hit.latest_version || "",
-      gameVersions: Array.isArray(hit.versions) ? hit.versions : [],
-      categories:
-        Array.isArray(hit.display_categories) && hit.display_categories.length
-          ? hit.display_categories
-          : Array.isArray(hit.categories)
-            ? hit.categories
-            : [],
-    })),
+    hits: mappedHits,
     totalHits: Number(result?.total_hits) || hits.length,
     offset: Number(result?.offset) || 0,
     limit: Number(result?.limit) || limit,
@@ -6660,40 +6723,63 @@ function readableStage(type) {
 
 function wireLauncher(client) {
   const lastStatus = new Map();
-  const context = activeLaunchContext;
 
   client.on("debug", (message) => sendEvent("debug", message));
   client.on("data", (message) => {
     sendEvent("game", message);
     try {
       const text = String(message || "");
-      
-      // Atualizar o RPC quando conectar em um servidor multiplayer
-      if (text.includes("Connecting to ")) {
-        const match = text.match(/Connecting to ([a-zA-Z0-9.-]+)(?:, (\d+))?/);
-        if (match && match[1]) {
-          const ip = match[1];
-          const port = match[2];
-          const fullIp = port && port !== "25565" ? `${ip}:${port}` : ip;
-          if (context && context.versionId) {
-            setPlayingRPC(context.versionId, fullIp);
-          }
-        }
-      } else if (text.includes("Disconnecting from") || text.includes("Disconnected from") || text.includes("Stopping server") || text.includes("Stopping integrated server")) {
-        // Voltar para "Jogando Singleplayer" quando desconectar
-        if (context && context.versionId) {
-          setPlayingRPC(context.versionId, null);
-        }
+      const ctx = activeLaunchContext;
+      if (!ctx || !ctx.versionId) return; // jogo ainda não está no contexto
+
+      // ── Detectar conexão com servidor multiplayer
+      // O Minecraft SEMPRE loga "Connecting to HOST, PORTA" (com vírgula + número)
+      // Isso evita falsos positivos de mods que não usam esse formato
+      const serverMatch = text.match(/Connecting to ([a-zA-Z0-9.\-_]+),\s*(\d+)/);
+      if (serverMatch) {
+        const ip = serverMatch[1];
+        const port = serverMatch[2];
+        const cleanIp = (port && port !== "25565") ? `${ip}:${port}` : ip;
+        setPlayingRPC(ctx.mcVersion, cleanIp, ctx.modpackName || null);
+        return;
       }
 
-      if (
-        text.includes("ClassCastException") &&
-        text.includes("URLClassLoader")
-      ) {
-        sendEvent(
-          "error",
-          "Erro de ClassCastException detectado (URLClassLoader). Isso indica runtime Java incompatível para esta versao modded. O launcher agora tenta localizar ou preparar automaticamente um runtime legacy compativel antes da inicializacao."
-        );
+      // ── Detectar entrada em mundo singleplayer
+      // Cobre: 1.7, 1.8, 1.12, 1.16, 1.20+ e modos offline/local/Microsoft
+      const isSingleplayer =
+        text.includes("Preparing spawn area") ||      // todas as versões
+        text.includes("Starting integrated server") || // 1.8.x, 1.12.x, 1.16+
+        text.includes("Preparing level") ||            // 1.7.x-1.8.x
+        text.includes("Loaded world") ||               // algumas versões modpack
+        text.includes("Joined world");                 // mods/versões novas
+
+      if (isSingleplayer) {
+        setPlayingRPC(ctx.mcVersion, null, ctx.modpackName || null);
+        return;
+      }
+
+      // ── Detectar saída de mundo ou servidor → volta para Em idle
+      // Cobre: desconexão de servidor, fechar mundo singleplayer, todos os MC versions
+      const isLeaving =
+        text.includes("Stopping integrated server") || // fechou mundo SP
+        text.includes("Stopping server") ||
+        text.includes("Disconnecting from") ||         // saindo de servidor
+        text.includes("Disconnected from") ||
+        text.includes("Returning to main menu") ||     // moderno
+        text.includes("Leaving world") ||
+        text.includes("Leaving multiplayer game") ||
+        text.includes("Connection lost") ||
+        text.includes("Server closed") ||
+        text.includes("You have been kicked") ||       // kick do servidor
+        text.includes("com.mojang.authlib") && text.includes("Disconnecting");
+
+      if (isLeaving) {
+        setLoadingRPC(ctx.mcVersion, ctx.modpackName || null);
+        return;
+      }
+
+      if (text.includes("ClassCastException") && text.includes("URLClassLoader")) {
+        sendEvent("error", "Erro de ClassCastException detectado (URLClassLoader). Isso indica runtime Java incompatível para esta versao modded. O launcher agora tenta localizar ou preparar automaticamente um runtime legacy compativel antes da inicializacao.");
       }
     } catch (_e) { }
   });
@@ -6772,6 +6858,10 @@ async function runMinecraft(mode, input) {
     const launchContext = {
       mode,
       versionId: preparedVersion.id,
+      mcVersion: preparedVersion.minecraftVersion || input.version.minecraftVersion || preparedVersion.id,
+      modpackName: (input.version.modpackTitle && input.version.modpackTitle !== input.version.id)
+        ? String(input.version.modpackTitle).trim()
+        : null,
       finished: false,
       process: null,
       processListeners: null,
@@ -6855,7 +6945,11 @@ async function runMinecraft(mode, input) {
       idleGuard.promise,
     ]);
     if (mode !== "install") {
-      setPlayingRPC(input.version.id, input.server || input.version.server || null);
+      // Mostrar 'Em idle' enquanto o jogo carrega
+      setLoadingRPC(
+        launchContext.mcVersion,
+        launchContext.modpackName || null
+      );
       watchLaunchProcess(activeProcess, launchContext);
     }
     stopIdleGuard();
@@ -6934,11 +7028,14 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   mainWindow.on("close", (event) => {
-    if (!app.isQuiting) {
-      event.preventDefault();
-      mainWindow.hide();
-    }
-    return false;
+    // Fechar normalmente — sem ir para o tray
+    app.isQuiting = true;
+  });
+
+  mainWindow.on("minimize", (event) => {
+    // Minimizar vai para o tray
+    event.preventDefault();
+    mainWindow.hide();
   });
 }
 
@@ -6962,7 +7059,7 @@ app.whenReady().then(() => {
   ipcMain.handle("state:get", () => getState());
   ipcMain.handle("versions:refresh", () => loadVersions(true));
   ipcMain.handle("version:uninstall", (_event, payload) => uninstallVersion(payload));
-  ipcMain.handle("modpacks:search", (_event, query, filters) => searchModpacks(query, filters || {}));
+  ipcMain.handle("modpacks:search", (_event, query, filters, limit, offset) => searchModpacks(query, filters || {}, limit, offset));
   ipcMain.handle("modpacks:versions", (_event, projectId) => getModpackVersions(projectId));
   ipcMain.handle("modpacks:install", (_event, payload) => installModpack(payload));
   ipcMain.handle("modpacks:createCustom", (_event, payload) => createCustomModpack(payload));
@@ -7018,8 +7115,8 @@ app.whenReady().then(() => {
   });
   ipcMain.on("window:close", () => {
     if (mainWindow) {
-      if (app.isQuiting) mainWindow.close();
-      else mainWindow.hide();
+      app.isQuiting = true;
+      mainWindow.close();
     }
   });
 

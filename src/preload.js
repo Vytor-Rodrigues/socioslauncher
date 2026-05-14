@@ -4,7 +4,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   getState: () => ipcRenderer.invoke("state:get"),
   refreshVersions: () => ipcRenderer.invoke("versions:refresh"),
   uninstallVersion: (payload) => ipcRenderer.invoke("version:uninstall", payload),
-  searchModpacks: (query, filters) => ipcRenderer.invoke("modpacks:search", query, filters),
+  searchModpacks: (query, filters, limit, offset) => ipcRenderer.invoke("modpacks:search", query, filters, limit, offset),
   getModpackVersions: (projectId) => ipcRenderer.invoke("modpacks:versions", projectId),
   installModpack: (payload) => ipcRenderer.invoke("modpacks:install", payload),
   createCustomModpack: (payload) => ipcRenderer.invoke("modpacks:createCustom", payload),

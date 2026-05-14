@@ -153,6 +153,16 @@
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
                 </button>
               </div>
+              <div id="modpack-pagination" class="hidden pagination-container">
+                <button id="modpack-page-prev" class="pagination-arrow" type="button" aria-label="Página anterior">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </button>
+                <div id="modpack-page-numbers" class="pagination-numbers"></div>
+                <button id="modpack-page-next" class="pagination-arrow" type="button" aria-label="Próxima página">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                </button>
+                <input id="modpack-page-jump" type="number" min="1" placeholder="Ir para" style="width: 70px; height: 32px; min-height: 32px; padding: 0 8px; border-radius: 6px; font-size: 12px; border: 1px solid var(--line); background: transparent; color: var(--text);" title="Ir para a página" />
+              </div>
               <div id="modpack-filters" class="modpack-filters hidden">
                 <div class="filter-group">
                   <span class="filter-label">Loader</span>
@@ -316,7 +326,7 @@
                     </optgroup>
                   </select>
                 </div>
-                <div class="filter-group">
+                <div id="modpack-filter-genre-group" class="filter-group">
                   <span class="filter-label">Gênero</span>
                   <select id="modpack-filter-genre" class="filter-version-select">
                     <option value="">Todos os gêneros</option>

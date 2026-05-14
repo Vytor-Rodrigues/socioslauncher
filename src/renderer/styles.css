@@ -2149,3 +2149,69 @@ pre {
   color: #000000;
   transform: none;
 }
+
+/* --- PAGINATION --- */
+.pagination-container {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.pagination-numbers {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pagination-arrow,
+.pagination-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 6px;
+  border-radius: 16px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.pagination-arrow {
+  padding: 0;
+  width: 32px;
+}
+
+.pagination-arrow:hover:not(:disabled),
+.pagination-number:hover:not(:disabled) {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.pagination-arrow:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.pagination-number.active {
+  background: #ffffff;
+  color: #000000;
+}
+
+.pagination-ellipsis {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 32px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+}

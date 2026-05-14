@@ -22,6 +22,8 @@ const state = {
   modpacksLoading: false,
   modpackQuery: "",
   modpackTotalHits: 0,
+  modpackPage: 1,
+  modpacksPerPage: 12,
   modpackSearchTimer: null,
   installingModpackId: null,
   pendingModpack: null,
@@ -164,6 +166,10 @@ const elements = {
   modpacksSearchTab: document.querySelector("#modpacks-search-tab"),
   modpacksDownloadedTab: document.querySelector("#modpacks-downloaded-tab"),
   versionSearch: document.querySelector("#version-search"),
+  modpackPagination: document.querySelector("#modpack-pagination"),
+  modpackPagePrev: document.querySelector("#modpack-page-prev"),
+  modpackPageNext: document.querySelector("#modpack-page-next"),
+  modpackPageNumbers: document.querySelector("#modpack-page-numbers"),
   launcherGrid: document.querySelector("#launcher-grid"),
   playPanel: document.querySelector("#play-panel"),
   versionList: document.querySelector("#version-list"),
@@ -192,6 +198,8 @@ const elements = {
   modpackFiltersPanel: document.querySelector("#modpack-filters"),
   modpackFilterVersion: document.querySelector("#modpack-filter-version"),
   modpackFilterGenre: document.querySelector("#modpack-filter-genre"),
+  modpackFilterGenreGroup: document.querySelector("#modpack-filter-genre-group"),
+  modpackPageJump: document.querySelector("#modpack-page-jump"),
   createModpackButton: document.querySelector("#create-modpack-button"),
   winMin: document.querySelector("#win-min"),
   winMax: document.querySelector("#win-max"),
@@ -3057,6 +3065,7 @@ function renderModpacks() {
       <div class="modpack-copy">
         <strong>${escapeHtml(modpack.title)}</strong>
         ${renderTagRow(modpackGenreTags(modpack.categories), "modpack-tags")}
+        <small>${escapeHtml(modpack.description || "")}</small>
       </div>
       <div class="modpack-actions"></div>
     `;
@@ -3158,6 +3167,75 @@ function renderLatest() {
     if (elements.modpackFilterBtn) {
       elements.modpackFilterBtn.classList.remove("hidden");
     }
+    
+    // Update pagination
+    if (elements.modpackPagination) {
+      if (state.activeModpacksTab === "downloaded" || state.activeCatalogKind === "mods" || !state.modpackTotalHits) {
+        elements.modpackPagination.classList.add("hidden");
+      } else {
+        elements.modpackPagination.classList.remove("hidden");
+        const totalPages = Math.max(1, Math.ceil(state.modpackTotalHits / state.modpacksPerPage));
+        const current = state.modpackPage;
+        
+        elements.modpackPagePrev.disabled = current <= 1 || state.modpacksLoading;
+        elements.modpackPageNext.disabled = current >= totalPages || state.modpacksLoading;
+        
+        if (elements.modpackPageJump) {
+          elements.modpackPageJump.value = current;
+          elements.modpackPageJump.max = totalPages;
+          elements.modpackPageJump.disabled = state.modpacksLoading;
+        }
+
+        if (elements.modpackPageNumbers) {
+          elements.modpackPageNumbers.innerHTML = "";
+          
+          const createBtn = (num) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "pagination-number" + (num === current ? " active" : "");
+            btn.textContent = num;
+            btn.disabled = state.modpacksLoading;
+            if (num !== current) {
+              btn.addEventListener("click", () => {
+                changeModpackPage(num - current);
+              });
+            }
+            elements.modpackPageNumbers.appendChild(btn);
+          };
+
+          const createEllipsis = () => {
+            const span = document.createElement("span");
+            span.className = "pagination-ellipsis";
+            span.textContent = "...";
+            elements.modpackPageNumbers.appendChild(span);
+          };
+
+          if (totalPages <= 7) {
+            for (let i = 1; i <= totalPages; i++) createBtn(i);
+          } else {
+            createBtn(1);
+            if (current > 3) createEllipsis();
+            
+            let start = Math.max(2, current - 1);
+            let end = Math.min(totalPages - 1, current + 1);
+            
+            if (current <= 3) {
+              end = 4;
+            } else if (current >= totalPages - 2) {
+              start = totalPages - 3;
+            }
+            
+            for (let i = start; i <= end; i++) {
+              createBtn(i);
+            }
+            
+            if (current < totalPages - 2) createEllipsis();
+            createBtn(totalPages);
+          }
+        }
+      }
+    }
+    
     renderModpackFilterUI();
     return;
   }
@@ -3206,13 +3284,16 @@ function renderModpackFilterUI() {
   if (elements.modpackFilterGenre) {
     elements.modpackFilterGenre.value = state.modpackFilters.genre || "";
   }
+  if (elements.modpackFilterGenreGroup) {
+    elements.modpackFilterGenreGroup.style.display = state.activeModpacksTab === "downloaded" ? "none" : "";
+  }
   // Sync funnel button active state
   if (elements.modpackFilterBtn) {
     elements.modpackFilterBtn.classList.toggle("active", hasActiveModpackFilters());
   }
 }
 
-async function refreshModpacks(query = state.modpackQuery) {
+async function refreshModpacks(query = state.modpackQuery, preservePage = false) {
   if (state.activeCatalogKind === "mods") {
     state.modsCatalogLoading = true;
     state.modpackQuery = String(query || "").trim();
@@ -3235,13 +3316,18 @@ async function refreshModpacks(query = state.modpackQuery) {
     return;
   }
 
+  if (!preservePage) {
+    state.modpackPage = 1;
+  }
+
   state.modpacksLoading = true;
   state.modpackQuery = String(query || "").trim();
   renderLatest();
   renderCatalog();
 
+  const offset = (state.modpackPage - 1) * state.modpacksPerPage;
   try {
-    const result = await api.searchModpacks(state.modpackQuery, state.modpackFilters);
+    const result = await api.searchModpacks(state.modpackQuery, state.modpackFilters, state.modpacksPerPage, offset);
     state.modpacks = result.hits || [];
     state.modpackTotalHits = result.totalHits || state.modpacks.length;
   } catch (error) {
@@ -4297,6 +4383,35 @@ elements.modpacksSearchTab.addEventListener("click", () => {
   setActiveModpacksTab("search");
 });
 elements.modpacksDownloadedTab.addEventListener("click", () => setActiveModpacksTab("downloaded"));
+
+function changeModpackPage(delta) {
+  const totalPages = Math.max(1, Math.ceil(state.modpackTotalHits / state.modpacksPerPage));
+  const newPage = state.modpackPage + delta;
+  if (newPage >= 1 && newPage <= totalPages) {
+    state.modpackPage = newPage;
+    refreshModpacks(state.modpackQuery, true);
+  }
+}
+
+if (elements.modpackPagePrev) {
+  elements.modpackPagePrev.addEventListener("click", () => changeModpackPage(-1));
+}
+if (elements.modpackPageNext) {
+  elements.modpackPageNext.addEventListener("click", () => changeModpackPage(1));
+}
+if (elements.modpackPageJump) {
+  elements.modpackPageJump.addEventListener("change", (e) => {
+    const totalPages = Math.max(1, Math.ceil(state.modpackTotalHits / state.modpacksPerPage));
+    let num = parseInt(e.target.value, 10);
+    if (isNaN(num)) num = state.modpackPage;
+    num = Math.max(1, Math.min(totalPages, num));
+    e.target.value = num;
+    
+    if (num !== state.modpackPage) {
+      changeModpackPage(num - state.modpackPage);
+    }
+  });
+}
 if (elements.catalogModsTab) {
   elements.catalogModsTab.addEventListener("click", () => {
     setActiveCatalogKind("mods");
