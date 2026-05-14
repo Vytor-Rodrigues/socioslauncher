@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, nativeImage } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, nativeImage, Tray, Menu } = require("electron");
 const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -9,6 +9,53 @@ const { pathToFileURL } = require("url");
 const AdmZip = require("adm-zip");
 const { Client } = require("minecraft-launcher-core");
 const { Auth } = require("msmc");
+const DiscordRPC = require("discord-rpc");
+
+const rpcClientId = "1504314985516372058"; // ID de exemplo do Discord. Substitua pelo seu Client ID real criado no portal.
+let rpcReady = false;
+let rpc = null;
+
+if (rpcClientId === "1339396263884849174") {
+  console.warn("[Socios Client]: O Discord RPC esta desativado porque o Client ID de exemplo esta em uso.");
+  console.warn("[Socios Client]: Para funcionar, crie uma Aplicacao no https://discord.com/developers/applications e coloque o seu 'Application ID' em 'rpcClientId' no arquivo src/main.js");
+} else {
+  DiscordRPC.register(rpcClientId);
+  rpc = new DiscordRPC.Client({ transport: "ipc" });
+
+  rpc.on("ready", () => {
+    rpcReady = true;
+    setIdleRPC();
+    console.log("[Socios Client]: Discord RPC conectado com sucesso!");
+  });
+
+  rpc.login({ clientId: rpcClientId }).catch((err) => {
+    console.warn("[Socios Client]: Falha ao conectar ao Discord RPC. Verifique se o Discord esta aberto e se o Client ID e valido.", err.message);
+  });
+}
+
+function setIdleRPC() {
+  if (!rpcReady || !rpc) return;
+  rpc.setActivity({
+    details: "Navegando no Launcher",
+    state: "Socios Client",
+    largeImageKey: "logosocios", // Defina esta imagem no seu Developer Portal
+    largeImageText: "Socios Client",
+    instance: false,
+  }).catch(console.error);
+}
+
+function setPlayingRPC(version, server) {
+  if (!rpcReady || !rpc) return;
+  const stateStr = server ? `Jogando em: ${server}` : "Jogando Singleplayer";
+  rpc.setActivity({
+    details: `Versão: ${version}`,
+    state: stateStr,
+    largeImageKey: "logosocios",
+    largeImageText: "Socios Client",
+    startTimestamp: new Date(),
+    instance: false,
+  }).catch(console.error);
+}
 
 const VERSION_MANIFEST_URL =
   "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -73,6 +120,7 @@ const BROKEN_MODPACK_VERSION_RULES = [
 
 let mainWindow;
 let logWindow = null;
+let tray = null;
 const logHistory = [];
 let busy = false;
 let activeProcess = null;
@@ -671,7 +719,7 @@ function loadAccountsData() {
       accounts,
     };
   }
-  
+
   // Migrate old account.json if it exists
   const oldData = readJson(userDataPath("account.json"), null);
   if (oldData && oldData.profile) {
@@ -686,7 +734,7 @@ function loadAccountsData() {
       accounts: [migratedAccount],
     };
   }
-  
+
   return { activeId: null, accounts: [] };
 }
 
@@ -808,11 +856,11 @@ function saveMicrosoftAccount(refreshToken, minecraftSession, options = {}) {
     updatedAt: new Date().toISOString(),
     skin: mergeAccountSkin(existingAccount),
   };
-  
+
   const existingIdx = data.accounts.findIndex(a => a.accountId === accountId);
   if (existingIdx >= 0) data.accounts[existingIdx] = account;
   else data.accounts.push(account);
-  
+
   if (options.makeActive !== false || !data.activeId) {
     data.activeId = accountId;
   }
@@ -847,7 +895,7 @@ function saveLocalAccount(username, options = {}) {
   const accountId = offlineUuid(safeUsername);
   const data = loadAccountsData();
   const existingAccount = accountById(data, accountId);
-  
+
   const account = {
     accountId,
     type: "local",
@@ -861,11 +909,11 @@ function saveLocalAccount(username, options = {}) {
     updatedAt: new Date().toISOString(),
     skin: mergeAccountSkin(existingAccount),
   };
-  
+
   const existingIdx = data.accounts.findIndex(a => a.accountId === accountId);
   if (existingIdx >= 0) data.accounts[existingIdx] = account;
   else data.accounts.push(account);
-  
+
   if (options.makeActive !== false || !data.activeId) {
     data.activeId = accountId;
   }
@@ -886,7 +934,7 @@ function deleteAccount(accountId) {
   const data = loadAccountsData();
   if (!accountId) accountId = data.activeId;
   removeAccountSkinFiles(accountId);
-  
+
   data.accounts = data.accounts.filter(a => a.accountId !== accountId);
   if (data.activeId === accountId) {
     data.activeId = data.accounts.length > 0 ? data.accounts[0].accountId : null;
@@ -1345,14 +1393,14 @@ async function syncPendingMicrosoftSkin(account) {
       type: "microsoft",
       profile: result.profile
         ? {
-            ...currentAccount.profile,
-            skins: Array.isArray(result.profile.skins)
-              ? result.profile.skins
-              : currentAccount.profile?.skins || [],
-            capes: Array.isArray(result.profile.capes)
-              ? result.profile.capes
-              : currentAccount.profile?.capes || [],
-          }
+          ...currentAccount.profile,
+          skins: Array.isArray(result.profile.skins)
+            ? result.profile.skins
+            : currentAccount.profile?.skins || [],
+          capes: Array.isArray(result.profile.capes)
+            ? result.profile.capes
+            : currentAccount.profile?.capes || [],
+        }
         : currentAccount.profile,
       updatedAt: syncedAt,
       skin: {
@@ -1426,14 +1474,14 @@ async function updateAccountSkin(payload) {
     type: normalizeAccountType(currentAccount),
     profile: microsoftSkinResult?.profile
       ? {
-          ...currentAccount.profile,
-          skins: Array.isArray(microsoftSkinResult.profile.skins)
-            ? microsoftSkinResult.profile.skins
-            : currentAccount.profile?.skins || [],
-          capes: Array.isArray(microsoftSkinResult.profile.capes)
-            ? microsoftSkinResult.profile.capes
-            : currentAccount.profile?.capes || [],
-        }
+        ...currentAccount.profile,
+        skins: Array.isArray(microsoftSkinResult.profile.skins)
+          ? microsoftSkinResult.profile.skins
+          : currentAccount.profile?.skins || [],
+        capes: Array.isArray(microsoftSkinResult.profile.capes)
+          ? microsoftSkinResult.profile.capes
+          : currentAccount.profile?.capes || [],
+      }
       : currentAccount.profile,
     updatedAt: new Date().toISOString(),
     skin: {
@@ -1615,14 +1663,14 @@ function redactSecrets(input) {
 
 function sendEvent(type, message, extra = {}) {
   if (activeIdleGuard) activeIdleGuard.touch();
-  
+
   const eventData = {
     type,
     message: redactSecrets(message),
     at: new Date().toISOString(),
     ...extra,
   };
-  
+
   if (type !== 'progress' && type !== 'download-status' && type !== 'install-progress' && type !== 'install-start') {
     logHistory.push({ type: eventData.type, message: eventData.message, time: Date.now() });
     if (logHistory.length > 1000) logHistory.shift();
@@ -2006,12 +2054,12 @@ function createInjectedSkinTexturesProperty(profile, variant, rootUrl, textureHa
     SKIN:
       variant === "slim"
         ? {
-            url: `${rootUrl}/textures/${textureHash}`,
-            metadata: { model: "slim" },
-          }
+          url: `${rootUrl}/textures/${textureHash}`,
+          metadata: { model: "slim" },
+        }
         : {
-            url: `${rootUrl}/textures/${textureHash}`,
-          },
+          url: `${rootUrl}/textures/${textureHash}`,
+        },
   };
 
   return Buffer.from(
@@ -2261,6 +2309,7 @@ function finalizeLaunchContext(context, code, source = "client") {
     code: code ?? 0,
     source,
   });
+  setIdleRPC();
   clearLaunchContext(context);
 }
 
@@ -2581,9 +2630,8 @@ function libraryArtifactPath(library) {
   const parsed = parseMavenName(library?.name);
   if (!parsed) return null;
 
-  const fileName = `${parsed.artifact}-${parsed.version}${
-    parsed.classifier ? `-${parsed.classifier}` : ""
-  }.jar`;
+  const fileName = `${parsed.artifact}-${parsed.version}${parsed.classifier ? `-${parsed.classifier}` : ""
+    }.jar`;
   return path.join(
     minecraftRoot(),
     "libraries",
@@ -2681,9 +2729,8 @@ function libraryDownloadCandidates(library) {
   const parsed = parseMavenName(library?.name);
   if (!parsed) return [];
 
-  const fileName = `${parsed.artifact}-${parsed.version}${
-    parsed.classifier ? `-${parsed.classifier}` : ""
-  }.jar`;
+  const fileName = `${parsed.artifact}-${parsed.version}${parsed.classifier ? `-${parsed.classifier}` : ""
+    }.jar`;
 
   const relativePath = `${parsed.group.replace(/\./g, "/")}/${parsed.artifact}/${parsed.version}/${fileName}`;
   const bases = [];
@@ -2983,9 +3030,9 @@ function libraryIdentityKey(library) {
     : "";
   const nativeKeys = library?.natives
     ? Object.keys(library.natives)
-        .sort()
-        .map((key) => `${key}:${library.natives[key]}`)
-        .join(",")
+      .sort()
+      .map((key) => `${key}:${library.natives[key]}`)
+      .join(",")
     : "";
   const rulesKey = Array.isArray(library?.rules) ? JSON.stringify(library.rules) : "";
 
@@ -3267,12 +3314,14 @@ function searchModpacksUrl(query, filters = {}, limit = 24) {
   url.searchParams.set("limit", String(Math.min(50, Math.max(1, Number(limit) || 24))));
   url.searchParams.set("index", normalizedQuery ? "relevance" : "downloads");
 
-  // Build facets: always filter by project_type:modpack, then optionally by loader and game_version
+  // Build facets: always filter by project_type:modpack, then optionally by loader, game_version and genre
   const facets = [["project_type:modpack"]];
   const loader = String(filters.loader || "").trim().toLowerCase();
   const gameVersion = String(filters.gameVersion || "").trim();
+  const genre = String(filters.genre || "").trim().toLowerCase();
   if (loader) facets.push([`categories:${loader}`]);
   if (gameVersion) facets.push([`versions:${gameVersion}`]);
+  if (genre) facets.push([`categories:${genre}`]);
   url.searchParams.set("facets", JSON.stringify(facets));
 
   if (normalizedQuery) {
@@ -4675,7 +4724,7 @@ function removeJarEntry(filePath, entryName) {
     const zip = new AdmZip(filePath);
     zip.deleteFile(entryName);
     zip.writeZip(filePath);
-  } catch (_error) {}
+  } catch (_error) { }
 }
 
 function optiFineLibraryDestination(artifact, version, fileName) {
@@ -6336,7 +6385,7 @@ async function ensureVersionFiles(version) {
         : await resolveOfficialVersionMeta(explicitBaseId)
       : selfContainedLocalVersion
         ? null
-      : await resolveFirstOfficialVersionMeta(
+        : await resolveFirstOfficialVersionMeta(
           localBaseVersionCandidates(version.id, normalizedLocalJson)
         );
 
@@ -6537,10 +6586,10 @@ function launcherOptions(version, authorization, settings, resolvedJavaPath) {
     window: launchwrapperResolutionWorkaround
       ? undefined
       : {
-          width: clampNumber(settings.windowWidth, 854, 3840, 1280),
-          height: clampNumber(settings.windowHeight, 480, 2160, 720),
-          fullscreen: false,
-        },
+        width: clampNumber(settings.windowWidth, 854, 3840, 1280),
+        height: clampNumber(settings.windowHeight, 480, 2160, 720),
+        fullscreen: false,
+      },
     overrides: {
       detached: false,
       maxSockets: 8,
@@ -6618,6 +6667,25 @@ function wireLauncher(client) {
     sendEvent("game", message);
     try {
       const text = String(message || "");
+      
+      // Atualizar o RPC quando conectar em um servidor multiplayer
+      if (text.includes("Connecting to ")) {
+        const match = text.match(/Connecting to ([a-zA-Z0-9.-]+)(?:, (\d+))?/);
+        if (match && match[1]) {
+          const ip = match[1];
+          const port = match[2];
+          const fullIp = port && port !== "25565" ? `${ip}:${port}` : ip;
+          if (context && context.versionId) {
+            setPlayingRPC(context.versionId, fullIp);
+          }
+        }
+      } else if (text.includes("Disconnecting from") || text.includes("Disconnected from") || text.includes("Stopping server") || text.includes("Stopping integrated server")) {
+        // Voltar para "Jogando Singleplayer" quando desconectar
+        if (context && context.versionId) {
+          setPlayingRPC(context.versionId, null);
+        }
+      }
+
       if (
         text.includes("ClassCastException") &&
         text.includes("URLClassLoader")
@@ -6627,7 +6695,7 @@ function wireLauncher(client) {
           "Erro de ClassCastException detectado (URLClassLoader). Isso indica runtime Java incompatível para esta versao modded. O launcher agora tenta localizar ou preparar automaticamente um runtime legacy compativel antes da inicializacao."
         );
       }
-    } catch (_e) {}
+    } catch (_e) { }
   });
   client.on("download", (name) =>
     sendEvent("download", `Baixado: ${name}`, { silent: true })
@@ -6719,16 +6787,16 @@ async function runMinecraft(mode, input) {
     const lanSkinRuntime =
       mode === "launch"
         ? await prepareMicrosoftLanSkinRuntime(
-            activeAccount,
-            localSkinRuntime.authorization,
-            preparedVersion,
-            launchContext
-          )
+          activeAccount,
+          localSkinRuntime.authorization,
+          preparedVersion,
+          launchContext
+        )
         : {
-            authorization: localSkinRuntime.authorization,
-            extraGameArgs: [],
-            extraJvmArgs: [],
-          };
+          authorization: localSkinRuntime.authorization,
+          extraGameArgs: [],
+          extraJvmArgs: [],
+        };
     const resolvedJavaPath = await resolveJavaPathForVersion(preparedVersion, settings);
     const options = launcherOptions(
       {
@@ -6787,6 +6855,7 @@ async function runMinecraft(mode, input) {
       idleGuard.promise,
     ]);
     if (mode !== "install") {
+      setPlayingRPC(input.version.id, input.server || input.version.server || null);
       watchLaunchProcess(activeProcess, launchContext);
     }
     stopIdleGuard();
@@ -6863,12 +6932,33 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+
+  mainWindow.on("close", (event) => {
+    if (!app.isQuiting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+    return false;
+  });
 }
 
 app.whenReady().then(() => {
   if (process.platform === "win32") {
     app.setAppUserModelId(LAUNCHER_NAME);
   }
+
+  tray = new Tray(path.join(app.getAppPath(), "taskbar-logo.png"));
+  const contextMenu = Menu.buildFromTemplate([
+    { label: "Mostrar Cliente", click: () => { if (mainWindow) mainWindow.show(); } },
+    { label: "Sair", click: () => { app.isQuiting = true; app.quit(); } }
+  ]);
+  tray.setToolTip("Socios Client");
+  tray.setContextMenu(contextMenu);
+  tray.on("click", () => {
+    if (mainWindow) {
+      mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+    }
+  });
   ipcMain.handle("state:get", () => getState());
   ipcMain.handle("versions:refresh", () => loadVersions(true));
   ipcMain.handle("version:uninstall", (_event, payload) => uninstallVersion(payload));
@@ -6927,7 +7017,10 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.on("window:close", () => {
-    if (mainWindow) mainWindow.close();
+    if (mainWindow) {
+      if (app.isQuiting) mainWindow.close();
+      else mainWindow.hide();
+    }
   });
 
   ipcMain.on("log:append", (_event, { type, message }) => {
@@ -6974,7 +7067,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin" && app.isQuiting) app.quit();
 });
 
 app.on("before-quit", () => {

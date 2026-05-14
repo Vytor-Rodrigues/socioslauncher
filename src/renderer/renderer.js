@@ -29,7 +29,7 @@ const state = {
   progressMode: "idle",
   progressValue: 0,
   progressResetTimer: null,
-  modpackFilters: { loader: "", gameVersion: "" },
+  modpackFilters: { loader: "", gameVersion: "", genre: "" },
   modpackFiltersOpen: false,
   // Download tracking for progress bar
   downloadModpackName: "",
@@ -191,6 +191,7 @@ const elements = {
   modpackFilterBtn: document.querySelector("#modpack-filter-btn"),
   modpackFiltersPanel: document.querySelector("#modpack-filters"),
   modpackFilterVersion: document.querySelector("#modpack-filter-version"),
+  modpackFilterGenre: document.querySelector("#modpack-filter-genre"),
   createModpackButton: document.querySelector("#create-modpack-button"),
   winMin: document.querySelector("#win-min"),
   winMax: document.querySelector("#win-max"),
@@ -3202,6 +3203,9 @@ function renderModpackFilterUI() {
   if (elements.modpackFilterVersion) {
     elements.modpackFilterVersion.value = state.modpackFilters.gameVersion || "";
   }
+  if (elements.modpackFilterGenre) {
+    elements.modpackFilterGenre.value = state.modpackFilters.genre || "";
+  }
   // Sync funnel button active state
   if (elements.modpackFilterBtn) {
     elements.modpackFilterBtn.classList.toggle("active", hasActiveModpackFilters());
@@ -4409,6 +4413,14 @@ if (elements.modpackFiltersPanel) {
 if (elements.modpackFilterVersion) {
   elements.modpackFilterVersion.addEventListener("change", () => {
     state.modpackFilters.gameVersion = elements.modpackFilterVersion.value;
+    renderModpackFilterUI();
+    refreshModpacks(elements.versionSearch.value);
+  });
+}
+
+if (elements.modpackFilterGenre) {
+  elements.modpackFilterGenre.addEventListener("change", () => {
+    state.modpackFilters.genre = elements.modpackFilterGenre.value;
     renderModpackFilterUI();
     refreshModpacks(elements.versionSearch.value);
   });
