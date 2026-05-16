@@ -16,7 +16,7 @@ const state = {
   accounts: [],
   settings: null,
   busy: false,
-  activeTab: "versions",
+  activeTab: "home",
   activeModpacksTab: "search",
   activeCatalogKind: "modpacks",
   modpacksLoading: false,
@@ -104,11 +104,20 @@ const state = {
   createModpackModsResults: [],
   createModpackSelectedMods: [],
   createModpackModsSearchTimer: null,
+  modpackPreviewOpen: false,
+  modpackPreviewModpack: null,
+  modpackPreviewLoading: false,
+  modpackPreviewError: "",
+  modpackPreviewFiles: [],
+  modpackPreviewExcluded: new Set(),
 };
 
 const elements = {
   navVersions: document.querySelector("#nav-versions"),
+  navHome: document.querySelector("#nav-home"),
   navModpacks: document.querySelector("#nav-modpacks"),
+  homeSection: document.querySelector("#home-section"),
+  homeRecentCard: document.querySelector("#home-recent-card"),
   topbarTitle: document.querySelector("#topbar-title"),
   browseMode: document.querySelector("#browse-mode"),
   accountStatus: document.querySelector("#account-status"),
@@ -245,9 +254,29 @@ const elements = {
   clearCreateModpackMods: document.querySelector("#clear-create-modpack-mods"),
   createModpackSelectedList: document.querySelector("#create-modpack-selected-list"),
   createModpackModResults: document.querySelector("#create-modpack-mod-results"),
+  createModpackProgressWrap: document.querySelector("#create-modpack-progress-wrap"),
+  createModpackProgressFill: document.querySelector("#create-modpack-progress-fill"),
+  createModpackProgressLabel: document.querySelector("#create-modpack-progress-label"),
   createModpackError: document.querySelector("#create-modpack-error"),
   modpackTargetVersionRow: document.querySelector("#modpack-target-version-row"),
   modpackTargetVersion: document.querySelector("#modpack-target-version"),
+  confirmModal: document.querySelector("#confirm-modal"),
+  confirmModalTitle: document.querySelector("#confirm-modal-title"),
+  confirmModalMessage: document.querySelector("#confirm-modal-message"),
+  confirmModalConfirm: document.querySelector("#confirm-modal-confirm"),
+  confirmModalCancel: document.querySelector("#confirm-modal-cancel"),
+  modpackPreviewModal: document.querySelector("#modpack-preview-modal"),
+  modpackPreviewTitle: document.querySelector("#modpack-preview-title"),
+  modpackPreviewSubtitle: document.querySelector("#modpack-preview-subtitle"),
+  modpackPreviewLoading: document.querySelector("#modpack-preview-loading"),
+  modpackPreviewError: document.querySelector("#modpack-preview-error"),
+  modpackPreviewControls: document.querySelector("#modpack-preview-controls"),
+  modpackPreviewCount: document.querySelector("#modpack-preview-count"),
+  modpackPreviewSelectAll: document.querySelector("#modpack-preview-select-all"),
+  modpackPreviewList: document.querySelector("#modpack-preview-list"),
+  confirmModpackPreview: document.querySelector("#confirm-modpack-preview"),
+  cancelModpackPreview: document.querySelector("#cancel-modpack-preview"),
+  closeModpackPreview: document.querySelector("#close-modpack-preview"),
 };
 
 function formatDate(value) {
@@ -268,6 +297,7 @@ function setBusy(value) {
   state.busy = value;
   [
     elements.navVersions,
+    elements.navHome,
     elements.navModpacks,
     elements.browseMode,
     elements.addAccount,
@@ -387,16 +417,19 @@ function animatePlayPanel(show) {
 function syncActionButtons() {
   const hasSelection = Boolean(state.selected);
   const canInstall = canInstallSelectedVersion();
+  const canLaunch = hasSelection && !canInstall;
 
   animatePlayPanel(hasSelection);
   elements.selectedPanel.classList.toggle("hidden", !hasSelection);
   elements.installVersion.hidden = !canInstall;
   elements.installVersion.disabled = state.busy || !canInstall;
-  elements.uninstallVersion.classList.toggle("hidden", !canUninstallSelectedVersion());
-  elements.uninstallVersion.disabled = state.busy || !canUninstallSelectedVersion();
-  elements.launchVersion.disabled = state.busy || !hasSelection;
+  elements.launchVersion.hidden = !canLaunch;
+  elements.launchVersion.disabled = state.busy || !canLaunch;
+  elements.uninstallVersion.classList.add("hidden");
+  elements.uninstallVersion.disabled = true;
   elements.clearSelection.disabled = state.busy || !hasSelection;
-  elements.playActions.classList.toggle("launch-only", hasSelection && !canInstall);
+  elements.playActions.classList.toggle("launch-only", canLaunch);
+  elements.playActions.classList.toggle("install-only", hasSelection && canInstall);
 }
 
 function validateLocalUsername(value) {
@@ -1372,20 +1405,19 @@ function escapeHtml(value) {
 }
 
 function modsEditorVisible() {
+  if (!state.selected?.id) return false;
+  const loaderType = String(state.selected?.loaderType || state.selected?.type || "").toLowerCase();
+  if (loaderType === "optifine" || loaderType === "forgeoptifine") return false;
   return (
-    Boolean(state.selected?.id) &&
     (
-      (
-        state.activeTab === "modpacks" &&
-        state.activeModpacksTab === "downloaded" &&
-        isDownloadedModpack(state.selected)
-      ) ||
-      (
-        state.activeTab === "versions" &&
-        Boolean(state.selected?.installed || state.selected?.local)
-      )
-    ) &&
-    Boolean(state.selected?.id)
+      state.activeTab === "modpacks" &&
+      state.activeModpacksTab === "downloaded" &&
+      isDownloadedModpack(state.selected)
+    ) ||
+    (
+      state.activeTab === "versions" &&
+      Boolean(state.selected?.installed || state.selected?.local)
+    )
   );
 }
 
@@ -1848,6 +1880,24 @@ function renderCreateModpackModal() {
         ? false
         : !state.createModpackName.trim() || !state.createModpackMinecraftVersion || !state.createModpackLoader);
   }
+
+  if (elements.createModpackProgressWrap) {
+    const showProgress = state.createModpackLoading && state.progressMode === "install";
+    elements.createModpackProgressWrap.classList.toggle("hidden", !showProgress);
+    if (showProgress) {
+      const pct = Math.max(0, Math.min(100, state.progressValue || 0));
+      if (elements.createModpackProgressFill) {
+        elements.createModpackProgressFill.style.width = `${pct}%`;
+      }
+      if (elements.createModpackProgressLabel) {
+        const dl = state.downloadedBytes > 0 ? formatBytes(state.downloadedBytes) : "";
+        const total = state.downloadTotalBytes > 0 ? formatBytes(state.downloadTotalBytes) : "";
+        elements.createModpackProgressLabel.textContent = dl && total
+          ? `${dl} / ${total}`
+          : `${pct}%`;
+      }
+    }
+  }
 }
 
 function refreshCreateModpackNameState() {
@@ -1896,10 +1946,20 @@ function openCreateModpackModal() {
   renderCreateModpackModal();
 
   requestAnimationFrame(() => {
-    if (!elements.createModpackName || !state.createModpackModalOpen) return;
-    elements.createModpackName.focus();
-    if (!state.createModpackName) {
+    if (!state.createModpackModalOpen) return;
+
+    if (elements.createModpackName) {
+      elements.createModpackName.disabled = false;
+      elements.createModpackName.readOnly = false;
+      elements.createModpackName.value = state.createModpackName || "";
+      elements.createModpackName.focus();
       elements.createModpackName.select();
+    }
+
+    if (elements.createModpackTags) {
+      elements.createModpackTags.disabled = false;
+      elements.createModpackTags.readOnly = false;
+      elements.createModpackTags.value = state.createModpackTags || "";
     }
   });
 }
@@ -2151,6 +2211,9 @@ function renderModsEditor(forceTextareaSync = false) {
           </span>
         `;
 
+        const itemActions = document.createElement("div");
+        itemActions.className = "mods-file-actions";
+
         if (isToggleableModpackEntry(entry)) {
           const toggle = document.createElement("button");
           toggle.type = "button";
@@ -2164,8 +2227,22 @@ function renderModsEditor(forceTextareaSync = false) {
             event.stopPropagation();
             toggleSelectedModpackMod(entry);
           });
-          button.appendChild(toggle);
+          itemActions.appendChild(toggle);
         }
+
+        const trashBtn = document.createElement("button");
+        trashBtn.type = "button";
+        trashBtn.className = "mods-file-trash";
+        trashBtn.title = "Excluir mod";
+        trashBtn.disabled = state.busy || state.modsLoading || state.modsSaving;
+        trashBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>`;
+        trashBtn.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deleteModEntry(entry);
+        });
+        itemActions.appendChild(trashBtn);
+
+        button.appendChild(itemActions);
 
         fragment.appendChild(button);
       });
@@ -2414,6 +2491,30 @@ async function toggleSelectedModpackMod(entry = null) {
         await openModsFileEntry(nextEntry);
       }
     }
+  } catch (error) {
+    appendLog("error", error.message || String(error));
+  }
+}
+
+async function deleteModEntry(entry) {
+  if (!entry?.relativePath || !state.selected?.id || !modsEditorVisible()) return;
+  if (state.busy) return;
+  const confirmed = await showConfirmModal({
+    title: `Excluir ${entry.name}?`,
+    message: "O arquivo sera removido permanentemente da pasta de mods. Essa acao nao pode ser desfeita.",
+    confirmLabel: "Excluir",
+  });
+  if (!confirmed) return;
+
+  try {
+    await api.deleteModFile({ versionId: state.selected.id, relativePath: entry.relativePath });
+    if (state.modsSelectedPath === entry.relativePath) {
+      state.modsSelectedPath = "";
+      state.modsSelectedEditable = false;
+      state.modsFileContent = "";
+      state.modsOriginalContent = "";
+    }
+    await loadModsFiles(true);
   } catch (error) {
     appendLog("error", error.message || String(error));
   }
@@ -2880,26 +2981,45 @@ function renderVersions() {
 
   const fragment = document.createDocumentFragment();
   versions.forEach((version) => {
-    const button = document.createElement("button");
-    button.className = "version-item";
+    const item = document.createElement("div");
+    item.className = "version-item";
     if (state.selected && state.selected.id === version.id) {
-      button.classList.add("selected");
+      item.classList.add("selected");
     }
-    button.type = "button";
-    button.innerHTML = `
+
+    const mainBtn = document.createElement("button");
+    mainBtn.className = "version-item-main";
+    mainBtn.type = "button";
+    mainBtn.innerHTML = `
       <span class="version-main">
         <strong>${escapeHtml(versionDisplayName(version))}</strong>
         ${renderTagRow(version.modpackTags)}
       </span>
     `;
-    button.addEventListener("click", () => {
+    mainBtn.addEventListener("click", () => {
       state.selected = version;
       renderSelected();
       renderVersions();
       syncModsEditorForSelection();
       syncLaunchModsForSelection();
     });
-    fragment.appendChild(button);
+    item.appendChild(mainBtn);
+
+    if (version.installed || version.local) {
+      const trash = document.createElement("button");
+      trash.className = "version-item-trash";
+      trash.type = "button";
+      trash.disabled = state.busy;
+      trash.title = "Desinstalar";
+      trash.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>`;
+      trash.addEventListener("click", (e) => {
+        e.stopPropagation();
+        uninstallVersion(version);
+      });
+      item.appendChild(trash);
+    }
+
+    fragment.appendChild(item);
   });
 
   elements.versionList.appendChild(fragment);
@@ -2926,25 +3046,42 @@ function renderDownloadedModpacks() {
 
   const fragment = document.createDocumentFragment();
   modpacks.forEach((version) => {
-    const button = document.createElement("button");
-    button.className = "version-item";
+    const item = document.createElement("div");
+    item.className = "version-item";
     if (state.selected && state.selected.id === version.id) {
-      button.classList.add("selected");
+      item.classList.add("selected");
     }
-    button.type = "button";
-    button.innerHTML = `
+
+    const mainBtn = document.createElement("button");
+    mainBtn.className = "version-item-main";
+    mainBtn.type = "button";
+    mainBtn.innerHTML = `
       <span class="version-main">
         <strong>${escapeHtml(versionDisplayName(version))}</strong>
         <small>${escapeHtml(versionCompactDetails(version) || "-")}</small>
       </span>
     `;
-    button.addEventListener("click", () => {
+    mainBtn.addEventListener("click", () => {
       state.selected = version;
       renderSelected();
       renderCatalog();
       syncModsEditorForSelection();
     });
-    fragment.appendChild(button);
+    item.appendChild(mainBtn);
+
+    const trash = document.createElement("button");
+    trash.className = "version-item-trash";
+    trash.type = "button";
+    trash.disabled = state.busy;
+    trash.title = "Desinstalar";
+    trash.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>`;
+    trash.addEventListener("click", (e) => {
+      e.stopPropagation();
+      uninstallVersion(version);
+    });
+    item.appendChild(trash);
+
+    fragment.appendChild(item);
   });
 
   elements.versionList.appendChild(fragment);
@@ -3042,19 +3179,34 @@ function renderModpacks() {
   const fragment = document.createDocumentFragment();
 
   state.modpacks.forEach((modpack) => {
+    const alreadyDownloaded = state.versions.some(
+      (v) => v.modpackProjectId === modpack.projectId && (v.installed || v.local)
+    );
+
     const card = document.createElement("article");
     card.className = "modpack-item";
+    if (alreadyDownloaded) card.classList.add("modpack-downloaded");
     if (state.selected && state.selected.projectId === modpack.projectId) {
       card.classList.add("selected");
     }
 
     const button = document.createElement("button");
-    button.className = "secondary";
     button.type = "button";
-    button.textContent =
-      state.installingModpackId === modpack.projectId ? "Baixando..." : "Baixar";
-    button.disabled = state.busy || state.installingModpackId === modpack.projectId;
-    button.addEventListener("click", () => startModpackInstall(modpack));
+    if (state.installingModpackId === modpack.projectId) {
+      button.className = "secondary";
+      button.textContent = "Baixando...";
+      button.disabled = true;
+    } else if (alreadyDownloaded) {
+      button.className = "primary";
+      button.textContent = "Baixado";
+      button.disabled = true;
+    } else {
+      button.className = "secondary icon-button";
+      button.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+      button.title = "Baixar";
+      button.disabled = state.busy;
+      button.addEventListener("click", () => startModpackInstall(modpack));
+    }
 
     card.innerHTML = `
       ${
@@ -3071,6 +3223,21 @@ function renderModpacks() {
     `;
 
     const actions = card.querySelector(".modpack-actions");
+
+    if (!alreadyDownloaded && state.installingModpackId !== modpack.projectId) {
+      const eyeBtn = document.createElement("button");
+      eyeBtn.type = "button";
+      eyeBtn.className = "modpack-eye-btn";
+      eyeBtn.title = "Ver mods do modpack";
+      eyeBtn.disabled = state.busy;
+      eyeBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+      eyeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openModpackPreview(modpack);
+      });
+      actions.appendChild(eyeBtn);
+    }
+
     actions.appendChild(button);
 
     fragment.appendChild(card);
@@ -3080,6 +3247,7 @@ function renderModpacks() {
 }
 
 function renderCatalog() {
+  if (state.activeTab === "home") return;
   if (state.activeTab === "modpacks") {
     renderModpacks();
     return;
@@ -3117,6 +3285,30 @@ function renderSelected() {
 }
 
 function renderLatest() {
+  if (state.activeTab === "home") {
+    if (elements.createModpackButton) {
+      elements.createModpackButton.classList.add("hidden");
+    }
+    elements.topbarTitle.textContent = "Início";
+    elements.latestLine.textContent = "Bem-vindo ao Socios Client";
+    elements.versionFilter.classList.add("hidden");
+    elements.modpackSubtabs.classList.add("hidden");
+    elements.versionSearch.parentElement.classList.add("hidden");
+    elements.refreshVersions.classList.add("hidden");
+    if (elements.modpackFilterBtn) {
+      elements.modpackFilterBtn.classList.add("hidden");
+    }
+    if (elements.modpackFiltersPanel) {
+      state.modpackFiltersOpen = false;
+      elements.modpackFiltersPanel.classList.add("hidden");
+    }
+    if (elements.modpackPagination) {
+      elements.modpackPagination.classList.add("hidden");
+    }
+    renderHomeTab();
+    return;
+  }
+
   if (state.activeTab === "modpacks") {
     if (elements.createModpackButton) {
       elements.createModpackButton.classList.toggle("hidden", state.activeModpacksTab !== "downloaded");
@@ -3250,7 +3442,8 @@ function renderLatest() {
   elements.modpackSubtabs.classList.add("hidden");
   elements.versionSearch.parentElement.classList.remove("hidden");
   elements.refreshVersions.classList.remove("hidden");
-  elements.refreshVersions.textContent = "Atualizar";
+  elements.refreshVersions.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>`;
+  elements.refreshVersions.title = "Atualizar";
   if (elements.modpackFilterBtn) {
     elements.modpackFilterBtn.classList.add("hidden");
   }
@@ -3381,6 +3574,75 @@ function setActiveCatalogKind(kind) {
   }
 }
 
+function getLastPlayedVersion() {
+  try {
+    const raw = localStorage.getItem("lastPlayedVersion");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLastPlayedVersion(version) {
+  try {
+    localStorage.setItem("lastPlayedVersion", JSON.stringify({
+      id: version.id,
+      name: version.name || version.id,
+      loaderType: version.loaderType || null,
+      minecraftVersion: version.minecraftVersion || null,
+      local: Boolean(version.local),
+      installed: Boolean(version.installed),
+    }));
+  } catch {
+    // silently ignore storage errors
+  }
+}
+
+function renderHomeTab() {
+  if (!elements.homeRecentCard) return;
+
+  const saved = getLastPlayedVersion();
+  const version = saved && state.versions.find((v) => v.id === saved.id);
+
+  if (!version) {
+    elements.homeRecentCard.innerHTML = `<p class="home-empty-hint">Nenhuma versão jogada ainda.<br>Selecione uma versão e clique em Jogar.</p>`;
+    return;
+  }
+
+  const loaderLabel = version.loaderType
+    ? ` · ${version.loaderType.charAt(0).toUpperCase() + version.loaderType.slice(1)}`
+    : "";
+  const metaLabel = version.minecraftVersion
+    ? `MC ${version.minecraftVersion}${loaderLabel}`
+    : version.id;
+
+  elements.homeRecentCard.innerHTML = `
+    <div class="home-recent-icon">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+    </div>
+    <div class="home-recent-info">
+      <strong>${version.name || version.id}</strong>
+      <small>${metaLabel}</small>
+    </div>
+    <button class="home-recent-play-btn" id="home-play-btn" type="button">Jogar agora</button>
+  `;
+
+  elements.homeRecentCard.classList.add("clickable");
+
+  const launchLastPlayed = () => {
+    state.selected = version;
+    setActiveTab("versions");
+    renderSelected();
+    runAction("launch");
+  };
+
+  elements.homeRecentCard.querySelector("#home-play-btn").onclick = (e) => {
+    e.stopPropagation();
+    launchLastPlayed();
+  };
+  elements.homeRecentCard.onclick = launchLastPlayed;
+}
+
 function setActiveTab(tab) {
   if (state.activeTab === tab) return;
 
@@ -3391,11 +3653,25 @@ function setActiveTab(tab) {
   if (elements.navVersions) {
     elements.navVersions.classList.toggle("active", tab === "versions");
   }
+  if (elements.navHome) {
+    elements.navHome.classList.toggle("active", tab === "home");
+  }
   if (elements.navModpacks) {
     elements.navModpacks.classList.toggle("active", tab === "modpacks");
   }
 
-  if (tab === "versions") {
+  const launcherGrid = document.querySelector("#launcher-grid");
+  if (launcherGrid) {
+    launcherGrid.classList.toggle("hidden", tab === "home");
+  }
+  if (elements.homeSection) {
+    elements.homeSection.classList.toggle("hidden", tab !== "home");
+  }
+
+  if (tab === "home") {
+    clearModpackSearchTimer();
+    renderHomeTab();
+  } else if (tab === "versions") {
     clearModpackSearchTimer();
     elements.versionSearch.value = "";
   } else {
@@ -3507,7 +3783,7 @@ async function installSelectedModVersion(modVersionId) {
   }
 }
 
-async function installModpackVersion(modpack, versionId = null) {
+async function installModpackVersion(modpack, versionId = null, excludedPaths = null) {
   if (!modpack?.projectId) return;
 
   state.installingModpackId = modpack.projectId;
@@ -3516,7 +3792,10 @@ async function installModpackVersion(modpack, versionId = null) {
 
   try {
     closeModpackVersionModal();
-    const result = await api.installModpack({ ...modpack, versionId });
+    closeModpackPreview();
+    const payload = { ...modpack, versionId };
+    if (excludedPaths && excludedPaths.length > 0) payload.excludedPaths = excludedPaths;
+    const result = await api.installModpack(payload);
     const data = await api.refreshVersions();
     state.versions = data.versions;
     state.latest = data.latest;
@@ -3535,6 +3814,113 @@ async function installModpackVersion(modpack, versionId = null) {
     setBusy(false);
     renderCatalog();
     renderAccount();
+  }
+}
+
+function openModpackPreview(modpack) {
+  if (!modpack?.projectId) return;
+  state.modpackPreviewOpen = true;
+  state.modpackPreviewModpack = modpack;
+  state.modpackPreviewLoading = true;
+  state.modpackPreviewError = "";
+  state.modpackPreviewFiles = [];
+  state.modpackPreviewExcluded = new Set();
+  renderModpackPreviewModal();
+
+  api.previewModpack({ projectId: modpack.projectId, title: modpack.title })
+    .then((result) => {
+      state.modpackPreviewFiles = result.files || [];
+      state.modpackPreviewLoading = false;
+      renderModpackPreviewModal();
+    })
+    .catch((err) => {
+      state.modpackPreviewLoading = false;
+      state.modpackPreviewError = err.message || String(err);
+      renderModpackPreviewModal();
+    });
+}
+
+function closeModpackPreview() {
+  if (!state.modpackPreviewOpen) return;
+  state.modpackPreviewOpen = false;
+  state.modpackPreviewModpack = null;
+  state.modpackPreviewLoading = false;
+  state.modpackPreviewError = "";
+  state.modpackPreviewFiles = [];
+  state.modpackPreviewExcluded = new Set();
+  renderModpackPreviewModal();
+}
+
+function renderModpackPreviewModal() {
+  if (!elements.modpackPreviewModal) return;
+
+  elements.modpackPreviewModal.classList.toggle("hidden", !state.modpackPreviewOpen);
+  elements.modpackPreviewModal.setAttribute("aria-hidden", state.modpackPreviewOpen ? "false" : "true");
+
+  if (!state.modpackPreviewOpen) return;
+
+  const modpack = state.modpackPreviewModpack;
+  if (elements.modpackPreviewTitle) {
+    elements.modpackPreviewTitle.textContent = modpack?.title ? `Pré-visualizar: ${modpack.title}` : "Pré-visualizar modpack";
+  }
+
+  const loading = state.modpackPreviewLoading;
+  const hasError = Boolean(state.modpackPreviewError);
+  const hasFiles = state.modpackPreviewFiles.length > 0;
+
+  if (elements.modpackPreviewLoading) elements.modpackPreviewLoading.classList.toggle("hidden", !loading);
+  if (elements.modpackPreviewError) {
+    elements.modpackPreviewError.classList.toggle("hidden", !hasError);
+    elements.modpackPreviewError.textContent = state.modpackPreviewError;
+  }
+  if (elements.modpackPreviewControls) elements.modpackPreviewControls.classList.toggle("hidden", !hasFiles);
+
+  const selected = state.modpackPreviewFiles.length - state.modpackPreviewExcluded.size;
+  if (elements.modpackPreviewCount) {
+    elements.modpackPreviewCount.textContent = `${selected} / ${state.modpackPreviewFiles.length} mods selecionados`;
+  }
+
+  if (elements.confirmModpackPreview) {
+    elements.confirmModpackPreview.disabled = loading || selected === 0;
+  }
+
+  if (elements.modpackPreviewList) {
+    elements.modpackPreviewList.innerHTML = "";
+    if (hasFiles) {
+      const frag = document.createDocumentFragment();
+      state.modpackPreviewFiles.forEach((file) => {
+        const excluded = state.modpackPreviewExcluded.has(file.path);
+        const item = document.createElement("label");
+        item.className = `modpack-preview-item${excluded ? " excluded" : ""}`;
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = !excluded;
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            state.modpackPreviewExcluded.delete(file.path);
+          } else {
+            state.modpackPreviewExcluded.add(file.path);
+          }
+          renderModpackPreviewModal();
+        });
+
+        const name = document.createElement("span");
+        name.className = "modpack-preview-name";
+        name.textContent = file.name.replace(/\.(jar|disabled)$/, "").replace(/-[\d.]+$/, "");
+        name.title = file.path;
+
+        const size = document.createElement("span");
+        size.className = "modpack-preview-size";
+        size.textContent = file.size > 0 ? formatBytes(file.size) : "";
+
+        item.appendChild(checkbox);
+        item.appendChild(name);
+        item.appendChild(size);
+        frag.appendChild(item);
+      });
+      elements.modpackPreviewList.appendChild(frag);
+    }
   }
 }
 
@@ -3685,8 +4071,11 @@ function setDownloadProgress(modpackName, percent, downloadedBytes, totalBytes, 
   state.progressValue = safePercent;
   state.downloadModpackName = modpackName;
 
-  updateDownloadSpeed(downloadedBytes);
-  const eta = computeETA(downloadedBytes, totalBytes);
+  // Garantir que bytes baixados nunca ultrapassem o total declarado
+  const safeDownloaded = totalBytes > 0 ? Math.min(downloadedBytes, totalBytes) : downloadedBytes;
+
+  updateDownloadSpeed(safeDownloaded);
+  const eta = computeETA(safeDownloaded, totalBytes);
 
   // Build label with modpack name
   const label = `Baixando: ${modpackName}`;
@@ -3694,7 +4083,7 @@ function setDownloadProgress(modpackName, percent, downloadedBytes, totalBytes, 
   // Build detailed info string
   const parts = [];
   if (totalBytes > 0) {
-    parts.push(`${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`);
+    parts.push(`${formatBytes(safeDownloaded)} / ${formatBytes(totalBytes)}`);
   }
   if (filesTotal > 0) {
     parts.push(`${filesDone}/${filesTotal} arquivos`);
@@ -3723,6 +4112,8 @@ function setDownloadProgress(modpackName, percent, downloadedBytes, totalBytes, 
     }
     detailEl.textContent = detailText;
   }
+
+  if (state.createModpackLoading) renderCreateModpackModal();
 }
 
 function handleLauncherEvent(event) {
@@ -3930,6 +4321,7 @@ async function runAction(action) {
       syncLaunchModsForSelection(true);
       setBusy(false);
     } else {
+      saveLastPlayedVersion(state.selected);
       await api.launchMinecraft(payload);
     }
   } catch (error) {
@@ -3938,28 +4330,56 @@ async function runAction(action) {
   }
 }
 
-async function uninstallSelectedVersion() {
-  if (!state.selected || !canUninstallSelectedVersion()) {
-    appendLog("error", "Selecione uma versao instalada para desinstalar.");
-    return;
-  }
+let _confirmResolve = null;
 
-  const selectedVersion = state.selected;
-  const selectedName = versionDisplayName(selectedVersion);
-  const confirmed = window.confirm(
-    `Desinstalar ${selectedName}?${
-      selectedVersion.modpackTitle ? " Isso tambem remove os arquivos da instancia." : ""
-    }`
-  );
+function showConfirmModal({ title, message, confirmLabel = "Confirmar" }) {
+  if (_confirmResolve !== null) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    _confirmResolve = resolve;
+    if (elements.confirmModalTitle) elements.confirmModalTitle.textContent = title;
+    if (elements.confirmModalMessage) elements.confirmModalMessage.textContent = message;
+    if (elements.confirmModalConfirm) elements.confirmModalConfirm.textContent = confirmLabel;
+    if (elements.confirmModal) {
+      elements.confirmModal.classList.remove("hidden");
+      elements.confirmModal.setAttribute("aria-hidden", "false");
+    }
+  });
+}
+
+function closeConfirmModal(result) {
+  if (elements.confirmModal) {
+    elements.confirmModal.classList.add("hidden");
+    elements.confirmModal.setAttribute("aria-hidden", "true");
+  }
+  if (_confirmResolve) {
+    _confirmResolve(result);
+    _confirmResolve = null;
+  }
+}
+
+async function uninstallVersion(version) {
+  if (!version || !(version.installed || version.local)) return;
+  if (state.busy) return;
+
+  const selectedName = versionDisplayName(version);
+  const confirmed = await showConfirmModal({
+    title: `Desinstalar ${selectedName}?`,
+    message: version.modpackTitle
+      ? "Isso tambem remove todos os arquivos da instancia. Essa acao nao pode ser desfeita."
+      : "Essa acao nao pode ser desfeita.",
+    confirmLabel: "Desinstalar",
+  });
   if (!confirmed) return;
+  if (state.busy) return;
 
   setBusy(true);
+  renderCatalog();
   try {
-    await api.uninstallVersion({ id: selectedVersion.id });
+    await api.uninstallVersion({ id: version.id });
     const data = await api.refreshVersions();
     state.versions = data.versions;
     state.latest = data.latest;
-    state.selected = null;
+    if (state.selected?.id === version.id) state.selected = null;
     renderLatest();
     renderSelected();
     renderCatalog();
@@ -3971,6 +4391,14 @@ async function uninstallSelectedVersion() {
     setBusy(false);
     renderAccount();
   }
+}
+
+async function uninstallSelectedVersion() {
+  if (!state.selected || !canUninstallSelectedVersion()) {
+    appendLog("error", "Selecione uma versao instalada para desinstalar.");
+    return;
+  }
+  await uninstallVersion(state.selected);
 }
 
 elements.addAccount.addEventListener("click", async () => {
@@ -4336,6 +4764,21 @@ if (elements.createModpackName) {
     state.createModpackError = "";
     refreshCreateModpackNameState();
   });
+  elements.createModpackName.addEventListener("change", (event) => {
+    state.createModpackName = event.target.value || "";
+  });
+  elements.createModpackName.addEventListener("blur", () => {
+    state.createModpackName = elements.createModpackName.value || "";
+    refreshCreateModpackNameState();
+  });
+  elements.createModpackName.addEventListener("keydown", (event) => {
+    state.createModpackName = event.target.value || "";
+  });
+  elements.createModpackName.removeAttribute("readonly");
+  elements.createModpackName.removeAttribute("disabled");
+  console.log("[Socios Client]: Create modpack name input initialized");
+} else {
+  console.error("[Socios Client]: Create modpack name input not found!");
 }
 if (elements.createModpackTags) {
   elements.createModpackTags.addEventListener("input", (event) => {
@@ -4343,6 +4786,21 @@ if (elements.createModpackTags) {
     state.createModpackError = "";
     refreshCreateModpackNameState();
   });
+  elements.createModpackTags.addEventListener("change", (event) => {
+    state.createModpackTags = event.target.value || "";
+  });
+  elements.createModpackTags.addEventListener("blur", () => {
+    state.createModpackTags = elements.createModpackTags.value || "";
+    refreshCreateModpackNameState();
+  });
+  elements.createModpackTags.addEventListener("keydown", (event) => {
+    state.createModpackTags = event.target.value || "";
+  });
+  elements.createModpackTags.removeAttribute("readonly");
+  elements.createModpackTags.removeAttribute("disabled");
+  console.log("[Socios Client]: Create modpack tags input initialized");
+} else {
+  console.error("[Socios Client]: Create modpack tags input not found!");
 }
 if (elements.createModpackVersion) {
   elements.createModpackVersion.addEventListener("change", (event) => {
@@ -4485,6 +4943,9 @@ if (elements.java8Path) elements.java8Path.addEventListener("change", saveSettin
 if (elements.navVersions) {
   elements.navVersions.addEventListener("click", () => setActiveTab("versions"));
 }
+if (elements.navHome) {
+  elements.navHome.addEventListener("click", () => setActiveTab("home"));
+}
 if (elements.navModpacks) {
   elements.navModpacks.addEventListener("click", () => setActiveTab("modpacks"));
 }
@@ -4585,6 +5046,44 @@ if (elements.modsFileContent) {
       event.preventDefault();
       saveModsFile();
     }
+  });
+}
+
+if (elements.confirmModalConfirm) {
+  elements.confirmModalConfirm.addEventListener("click", () => closeConfirmModal(true));
+}
+if (elements.confirmModalCancel) {
+  elements.confirmModalCancel.addEventListener("click", () => closeConfirmModal(false));
+}
+if (elements.confirmModal) {
+  elements.confirmModal.addEventListener("click", (e) => {
+    if (e.target === elements.confirmModal) closeConfirmModal(false);
+  });
+}
+
+if (elements.closeModpackPreview) {
+  elements.closeModpackPreview.addEventListener("click", closeModpackPreview);
+}
+if (elements.cancelModpackPreview) {
+  elements.cancelModpackPreview.addEventListener("click", closeModpackPreview);
+}
+if (elements.modpackPreviewModal) {
+  elements.modpackPreviewModal.addEventListener("click", (event) => {
+    if (event.target === elements.modpackPreviewModal) closeModpackPreview();
+  });
+}
+if (elements.confirmModpackPreview) {
+  elements.confirmModpackPreview.addEventListener("click", () => {
+    const modpack = state.modpackPreviewModpack;
+    if (!modpack) return;
+    const excluded = Array.from(state.modpackPreviewExcluded);
+    installModpackVersion(modpack, null, excluded);
+  });
+}
+if (elements.modpackPreviewSelectAll) {
+  elements.modpackPreviewSelectAll.addEventListener("click", () => {
+    state.modpackPreviewExcluded = new Set();
+    renderModpackPreviewModal();
   });
 }
 

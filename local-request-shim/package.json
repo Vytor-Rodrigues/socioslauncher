@@ -1,0 +1,7 @@
+{
+  "name": "request-shim",
+  "version": "2.88.2",
+  "description": "Secure drop-in replacement for request using Node built-in http/https",
+  "main": "index.js",
+  "license": "MIT"
+}

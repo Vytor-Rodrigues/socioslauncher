@@ -4291,7 +4291,6 @@ async function createCustomModpack(payload) {
     const loaderVersion = (manifest?.versions || []).find(
       (version) =>
         Boolean(version?.remoteLoader) &&
-        !version?.local &&
         String(version?.minecraftVersion || "").trim() === minecraftVersion &&
         String(version?.loaderType || "").trim().toLowerCase() === loaderType
     );
@@ -4377,6 +4376,11 @@ async function preDownloadMinecraftFiles(versionId) {
   };
 
   const preparedVersion = await ensureVersionFiles(versionRecord);
+
+  // gameDirectory é retornado como Object por versionGameDirectory; normalizar para string
+  if (preparedVersion.gameDirectory && typeof preparedVersion.gameDirectory === "object") {
+    preparedVersion.gameDirectory = preparedVersion.gameDirectory.path || null;
+  }
 
   const resolvedJavaPath = await resolveJavaPathForVersion(preparedVersion, {});
   if (!resolvedJavaPath) {
@@ -4490,10 +4494,15 @@ async function installModpack(payload) {
     const baseJson = await prepareModpackBaseJson(versionInfo);
 
     // Compute total file count and total expected bytes for global progress
-    const indexedFiles = (Array.isArray(modpackIndex.files) ? modpackIndex.files : []).filter(f => f?.path);
+    const excludedSet = new Set(Array.isArray(payload.excludedPaths) ? payload.excludedPaths : []);
+    const indexedFiles = (Array.isArray(modpackIndex.files) ? modpackIndex.files : [])
+      .filter(f => f?.path)
+      .filter(f => !excludedSet.has(f.path));
     const totalExpectedBytes = indexedFiles.reduce((sum, f) => sum + (Number(f.fileSize) || 0), 0);
     globalDownloadTracker.filesTotal = indexedFiles.length;
     globalDownloadTracker.totalBytes = totalExpectedBytes;
+    // Zerar bytes baixados: o .mrpack já foi contado mas não faz parte dos arquivos do modpack
+    globalDownloadTracker.downloadedBytes = 0;
     globalDownloadTracker.startTime = Date.now();
 
     // Send install-start event with modpack name and file count
@@ -4535,6 +4544,9 @@ async function installModpack(payload) {
 
     await loadVersions(true).catch(() => null);
 
+    // Desativar tracker antes do preDownload para que Minecraft/libs não contaminem o contador
+    globalDownloadTracker = null;
+
     try {
       await preDownloadMinecraftFiles(modpackId);
     } catch (pdError) {
@@ -4556,6 +4568,38 @@ async function installModpack(payload) {
     busy = false;
     globalDownloadTracker = null;
   }
+}
+
+async function previewModpack(payload) {
+  if (!payload?.projectId) throw new Error("projectId is required");
+
+  const projectVersions = await modrinthProjectVersions(payload.projectId);
+  const selected = selectModpackVersionById(projectVersions, null);
+  const archiveFileName = selected.file.filename || `${selected.version.id}.mrpack`;
+  const archivePath = modpackArchiveCachePath(payload.projectId, selected.version.id, archiveFileName);
+
+  if (!fs.existsSync(archivePath)) {
+    await downloadFileWithCandidates([selected.file.url], archivePath, "client-package", `Preview ${payload.title || payload.projectId}`);
+  }
+
+  const archive = new AdmZip(archivePath);
+  const modpackIndex = readModpackIndex(archive);
+
+  const files = (Array.isArray(modpackIndex.files) ? modpackIndex.files : [])
+    .filter(f => f?.path)
+    .map(f => ({
+      path: f.path,
+      name: f.path.split("/").pop() || f.path,
+      size: Number(f.fileSize) || 0,
+      env: f.env || null,
+    }));
+
+  return {
+    files,
+    versionNumber: selected.version.version_number || selected.version.id,
+    versionId: selected.version.id,
+    projectId: payload.projectId,
+  };
 }
 
 async function installMod(payload) {
@@ -6349,6 +6393,19 @@ function writeModsFile(payload) {
   };
 }
 
+function deleteModsFile(payload) {
+  const workspace = resolveModsWorkspace(payload?.versionId);
+  const relativePath = normalizeModsRelativePath(payload?.relativePath);
+  const filePath = ensurePathInsideRoot(workspace.rootPath, path.join(workspace.rootPath, relativePath));
+
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error("Arquivo de mods nao encontrado.");
+  }
+
+  fs.unlinkSync(filePath);
+  return { ok: true };
+}
+
 function inferVersionLoaderType(version = null, versionJson = null) {
   const explicitLoader = String(
     version?.loaderType || versionJson?.loaderType || ""
@@ -7017,6 +7074,10 @@ function launcherOptions(version, authorization, settings, resolvedJavaPath) {
     ["--width", "--height", "--fullscreen"]
   );
 
+  const loaderTypeLower = String(version.loaderType || "").toLowerCase();
+  const isForgeLoader = ["forge", "forgeoptifine", "neoforge"].includes(loaderTypeLower);
+  const forgeJvmArgs = isForgeLoader ? ["-Dfml.earlyprogresswindow=false"] : [];
+
   return {
     clientPackage: null,
     authorization: resolvedAuthorization,
@@ -7039,6 +7100,7 @@ function launcherOptions(version, authorization, settings, resolvedJavaPath) {
       "-Djava.net.preferIPv4Addresses=true",
       "-Dsun.net.client.defaultConnectTimeout=20000",
       "-Dsun.net.client.defaultReadTimeout=20000",
+      ...forgeJvmArgs,
       ...(version.extraJvmArgs || []),
     ],
     customLaunchArgs,
@@ -7056,7 +7118,7 @@ function launcherOptions(version, authorization, settings, resolvedJavaPath) {
       classes: version.classes,
       versionJson: version.launchJsonPath,
       minecraftJar: version.minecraftJar,
-      gameDirectory: version.gameDirectory || undefined,
+      gameDirectory: (typeof version.gameDirectory === "string" ? version.gameDirectory : version.gameDirectory?.path) || undefined,
       url: {
         meta: "https://piston-meta.mojang.com",
         resource: "https://resources.download.minecraft.net",
@@ -7176,6 +7238,32 @@ function wireLauncher(client, context) {
 
       if (text.includes("ClassCastException") && text.includes("URLClassLoader")) {
         sendEvent("error", "Erro de ClassCastException detectado (URLClassLoader). Isso indica runtime Java incompatível para esta versao modded. O launcher agora tenta localizar ou preparar automaticamente um runtime legacy compativel antes da inicializacao.");
+      }
+
+      // ── Detectar falha de OpenGL/GLFW (VM sem aceleração 3D ou drivers ausentes)
+      const isOpenGLError =
+        text.includes("Failed to find a valid GLFW profile") ||
+        text.includes("WGL: The driver does not appear to support OpenGL") ||
+        text.includes("GLFW error: [0x10006]") ||
+        text.includes("Failed to initialize graphics window") ||
+        text.includes("Timed out trying to setup the Game Window") ||
+        text.includes("No OpenGL context found") ||
+        (text.includes("GLFW") && text.includes("0x10006"));
+
+      if (isOpenGLError && !ctx._openglErrorShown) {
+        ctx._openglErrorShown = true;
+        sendEvent(
+          "error",
+          "ERRO DE OPENGL: O sistema nao possui suporte a OpenGL suficiente para rodar o Minecraft.\n\n" +
+          "Causas mais comuns:\n" +
+          "  - Drivers de placa de video nao instalados\n" +
+          "  - Maquina virtual (VM) sem aceleracao 3D ativada\n\n" +
+          "Como resolver:\n" +
+          "  1. PC normal: instale o driver da sua GPU (NVIDIA, AMD ou Intel)\n" +
+          "  2. VirtualBox: instale o 'VirtualBox Guest Additions' e ative 'Enable 3D Acceleration' nas configuracoes da VM\n" +
+          "  3. VMware: instale o 'VMware Tools' e ative a aceleracao 3D\n" +
+          "  4. Hyper-V: nao suporta OpenGL; use VirtualBox ou VMware"
+        );
       }
     } catch (_e) { }
   });
@@ -7435,29 +7523,39 @@ function createWindow() {
   });
 }
 
+process.on("uncaughtException", (err) => {
+  console.error("[Socios Client]: Erro nao tratado:", err);
+});
+
 app.whenReady().then(() => {
   if (process.platform === "win32") {
     app.setAppUserModelId(LAUNCHER_NAME);
   }
 
-  tray = new Tray(path.join(app.getAppPath(), "taskbar-logo.png"));
-  const contextMenu = Menu.buildFromTemplate([
-    { label: "Mostrar Cliente", click: () => { if (mainWindow) mainWindow.show(); } },
-    { label: "Sair", click: () => { app.isQuiting = true; app.quit(); } }
-  ]);
-  tray.setToolTip("Socios Client");
-  tray.setContextMenu(contextMenu);
-  tray.on("click", () => {
-    if (mainWindow) {
-      mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
-    }
-  });
+  try {
+    const trayIconPath = path.join(app.getAppPath(), "taskbar-logo.png");
+    tray = new Tray(trayIconPath);
+    const contextMenu = Menu.buildFromTemplate([
+      { label: "Mostrar Cliente", click: () => { if (mainWindow) mainWindow.show(); } },
+      { label: "Sair", click: () => { app.isQuiting = true; app.quit(); } }
+    ]);
+    tray.setToolTip("Socios Client");
+    tray.setContextMenu(contextMenu);
+    tray.on("click", () => {
+      if (mainWindow) {
+        mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+      }
+    });
+  } catch (err) {
+    console.warn("[Socios Client]: Falha ao criar icone na bandeja do sistema:", err.message);
+  }
   ipcMain.handle("state:get", () => getState());
   ipcMain.handle("versions:refresh", () => loadVersions(true));
   ipcMain.handle("version:uninstall", (_event, payload) => uninstallVersion(payload));
   ipcMain.handle("modpacks:search", (_event, query, filters, limit, offset) => searchModpacks(query, filters || {}, limit, offset));
   ipcMain.handle("modpacks:versions", (_event, projectId) => getModpackVersions(projectId));
   ipcMain.handle("modpacks:install", (_event, payload) => installModpack(payload));
+  ipcMain.handle("modpacks:preview", (_event, payload) => previewModpack(payload));
   ipcMain.handle("modpacks:createCustom", (_event, payload) => createCustomModpack(payload));
   ipcMain.handle("mods:search", (_event, query, filters) => searchMods(query, filters || {}));
   ipcMain.handle("mods:versions", (_event, projectId) => getModVersions(projectId));
@@ -7466,6 +7564,7 @@ app.whenReady().then(() => {
   ipcMain.handle("mods:readFile", (_event, payload) => readModsFile(payload));
   ipcMain.handle("mods:writeFile", (_event, payload) => writeModsFile(payload));
   ipcMain.handle("mods:toggleModpackFileActive", (_event, payload) => toggleModpackFileActive(payload));
+  ipcMain.handle("mods:deleteFile", (_event, payload) => deleteModsFile(payload));
   ipcMain.handle("mods:listLaunchMods", (_event, payload) => listLaunchMods(payload));
   ipcMain.handle("mods:toggleLaunchMod", (_event, payload) => toggleLaunchMod(payload));
   ipcMain.handle("account:add", async () => {
