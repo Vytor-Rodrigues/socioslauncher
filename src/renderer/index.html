@@ -786,6 +786,21 @@
       <canvas id="crafty-skin-hover-canvas" class="crafty-skin-hover-canvas" width="260" height="320"></canvas>
     </div>
 
+    <div id="alert-modal" class="modal-backdrop hidden" aria-hidden="true">
+      <div class="modal-card modal-card-confirm" role="alertdialog" aria-modal="true" aria-labelledby="alert-modal-title">
+        <div class="confirm-modal-body">
+          <div class="confirm-modal-icon alert-modal-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+          </div>
+          <h3 id="alert-modal-title">Aviso</h3>
+          <p id="alert-modal-message"></p>
+        </div>
+        <div class="modal-actions">
+          <button id="alert-modal-ok" class="primary" type="button">OK</button>
+        </div>
+      </div>
+    </div>
+
     <script src="../../node_modules/skinview3d/bundles/skinview3d.bundle.js"></script>
     <script src="./renderer.js"></script>
   </body>

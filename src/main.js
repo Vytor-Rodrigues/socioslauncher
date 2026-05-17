@@ -5180,6 +5180,69 @@ function runJavaProcess(javaPath, args, cwd, label) {
   }
 }
 
+/**
+ * Garante que um caminho Java valido esteja disponivel para executar um instalador .jar.
+ * Se nenhum Java for encontrado no sistema, tenta provisionar automaticamente o runtime
+ * portatil via ensureBundledJavaRuntime. Lanca erro claro se ainda assim nao conseguir.
+ *
+ * @param {string|null|undefined} javaPath - Caminho Java ja resolvido (pode ser falsy).
+ * @param {object} versionRef - Objeto de versao para inferir o componente Java necessario.
+ * @param {string} installerLabel - Nome do instalador para mensagens de erro.
+ * @returns {Promise<string>} - Caminho Java valido.
+ */
+async function ensureJavaForInstaller(javaPath, versionRef, installerLabel) {
+  if (javaPath) return javaPath;
+
+  // Tentar provisionar o runtime Java portatil automaticamente
+  const component = javaRuntimeComponentForVersion(versionRef);
+  if (component) {
+    sendEvent(
+      "debug",
+      `Java nao encontrado para ${installerLabel}; tentando provisionar runtime portatil (${component}) automaticamente...`
+    );
+    try {
+      const provisioned = await ensureBundledJavaRuntime(component, versionRef);
+      if (provisioned) {
+        sendEvent("debug", `Runtime Java provisionado para ${installerLabel}: ${provisioned}`);
+        return provisioned;
+      }
+    } catch (provisionError) {
+      sendEvent(
+        "warning",
+        `Falha ao provisionar runtime Java para ${installerLabel}: ${provisionError.message || String(provisionError)}`
+      );
+    }
+  }
+
+  // Ultimo recurso: tentar baixar Java 17 moderno se nao houver componente definido
+  if (!component) {
+    const fallbackComponent = "java-runtime-gamma";
+    const fallbackVersion = { javaVersion: { component: fallbackComponent, majorVersion: 17 } };
+    sendEvent(
+      "debug",
+      `Componente Java nao definido para ${installerLabel}; provisionando Java 17 portatil como fallback...`
+    );
+    try {
+      const provisioned = await ensureBundledJavaRuntime(fallbackComponent, fallbackVersion);
+      if (provisioned) {
+        sendEvent("debug", `Runtime Java 17 (fallback) provisionado para ${installerLabel}: ${provisioned}`);
+        return provisioned;
+      }
+    } catch (fallbackError) {
+      sendEvent(
+        "warning",
+        `Falha ao provisionar Java 17 portatil para ${installerLabel}: ${fallbackError.message || String(fallbackError)}`
+      );
+    }
+  }
+
+  throw new Error(
+    `Java nao encontrado no sistema e nao foi possivel baixar automaticamente. ` +
+    `Para instalar ${installerLabel}, acesse as Configuracoes do launcher e informe o caminho do Java, ` +
+    `ou verifique a conexao com a internet para que o launcher baixe o Java portatil.`
+  );
+}
+
 function removeJarEntry(filePath, entryName) {
   if (!fs.existsSync(filePath)) return;
 
@@ -5445,10 +5508,9 @@ async function installRemoteForgeVersion(version, preparedDependencies = null) {
     return installLegacyForgeFromInstaller(version, installerPath);
   }
 
-  const javaPath = preparedJavaPath || await resolveJavaPathForVersion(
-    runtimeVersion || { ...meta, javaVersion: versionJson.javaVersion },
-    loadSettings()
-  );
+  const resolvedVersionRef = runtimeVersion || { ...meta, javaVersion: versionJson.javaVersion };
+  const rawJavaPath = preparedJavaPath || await resolveJavaPathForVersion(resolvedVersionRef, loadSettings());
+  const javaPath = await ensureJavaForInstaller(rawJavaPath, resolvedVersionRef, `Forge ${version.minecraftVersion}`);
   try {
     runJavaProcess(
       javaPath,
@@ -5507,10 +5569,9 @@ async function installRemoteNeoForgeVersion(version, preparedDependencies = null
     "Instalador NeoForge"
   );
 
-  const javaPath = preparedJavaPath || await resolveJavaPathForVersion(
-    runtimeVersion || { ...meta, javaVersion: versionJson.javaVersion },
-    loadSettings()
-  );
+  const resolvedNeoVersionRef = runtimeVersion || { ...meta, javaVersion: versionJson.javaVersion };
+  const rawNeoJavaPath = preparedJavaPath || await resolveJavaPathForVersion(resolvedNeoVersionRef, loadSettings());
+  const javaPath = await ensureJavaForInstaller(rawNeoJavaPath, resolvedNeoVersionRef, `NeoForge ${version.minecraftVersion}`);
 
   try {
     runJavaProcess(
@@ -5602,10 +5663,9 @@ async function installRemoteOptiFineVersion(version) {
     await downloadFile(version.installerUrl, installerPath, "client-package", "Instalador OptiFine");
   }
 
-  const javaPath = await resolveJavaPathForVersion(
-    { ...meta, javaVersion: versionJson.javaVersion },
-    loadSettings()
-  );
+  const optiFineVersionRef = { ...meta, javaVersion: versionJson.javaVersion };
+  const rawOptiFineJavaPath = await resolveJavaPathForVersion(optiFineVersionRef, loadSettings());
+  const javaPath = await ensureJavaForInstaller(rawOptiFineJavaPath, optiFineVersionRef, `OptiFine ${version.minecraftVersion}`);
 
   if (repairRequired) {
     fs.rmSync(versionDirectory(version.id), { recursive: true, force: true });
@@ -7308,6 +7368,17 @@ async function runMinecraft(mode, input) {
   if (busy) throw new Error("Ja existe uma instalacao ou jogo em andamento.");
   if (!input || !input.version || !input.version.id) {
     throw new Error("Selecione uma versao do Minecraft.");
+  }
+
+  // Verificar conta antes de qualquer operacao
+  if (!loadAccount()) {
+    throw new Error(
+      mode === "install"
+        ? "Voce precisa de uma conta vinculada para instalar versoes do Minecraft. " +
+          "Adicione uma conta Microsoft ou local em 'Contas' antes de continuar."
+        : "Voce precisa de uma conta vinculada para jogar. " +
+          "Adicione uma conta Microsoft ou local em 'Contas' antes de continuar."
+    );
   }
 
   ensureModpackVersionAllowed(

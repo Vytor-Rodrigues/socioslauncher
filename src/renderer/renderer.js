@@ -277,6 +277,10 @@ const elements = {
   confirmModpackPreview: document.querySelector("#confirm-modpack-preview"),
   cancelModpackPreview: document.querySelector("#cancel-modpack-preview"),
   closeModpackPreview: document.querySelector("#close-modpack-preview"),
+  alertModal: document.querySelector("#alert-modal"),
+  alertModalTitle: document.querySelector("#alert-modal-title"),
+  alertModalMessage: document.querySelector("#alert-modal-message"),
+  alertModalOk: document.querySelector("#alert-modal-ok"),
 };
 
 function formatDate(value) {
@@ -4296,7 +4300,12 @@ async function runAction(action) {
     return;
   }
   if (!state.account) {
-    appendLog("error", "Adicione uma conta Microsoft ou local.");
+    showAlertModal({
+      title: action === "install" ? "Conta necessaria para instalar" : "Conta necessaria para jogar",
+      message: action === "install"
+        ? "Voce precisa de uma conta vinculada para baixar versoes do Minecraft. Adicione uma conta Microsoft ou local em 'Contas' antes de continuar."
+        : "Voce precisa de uma conta vinculada para jogar. Adicione uma conta Microsoft ou local em 'Contas' antes de continuar.",
+    });
     return;
   }
 
@@ -4354,6 +4363,25 @@ function closeConfirmModal(result) {
   if (_confirmResolve) {
     _confirmResolve(result);
     _confirmResolve = null;
+  }
+}
+
+function showAlertModal({ title = "Aviso", message }) {
+  if (elements.alertModalTitle) elements.alertModalTitle.textContent = title;
+  if (elements.alertModalMessage) elements.alertModalMessage.textContent = message;
+  if (elements.alertModal) {
+    elements.alertModal.classList.remove("hidden");
+    elements.alertModal.setAttribute("aria-hidden", "false");
+    requestAnimationFrame(() => {
+      if (elements.alertModalOk) elements.alertModalOk.focus();
+    });
+  }
+}
+
+function closeAlertModal() {
+  if (elements.alertModal) {
+    elements.alertModal.classList.add("hidden");
+    elements.alertModal.setAttribute("aria-hidden", "true");
   }
 }
 
@@ -5058,6 +5086,15 @@ if (elements.confirmModalCancel) {
 if (elements.confirmModal) {
   elements.confirmModal.addEventListener("click", (e) => {
     if (e.target === elements.confirmModal) closeConfirmModal(false);
+  });
+}
+
+if (elements.alertModalOk) {
+  elements.alertModalOk.addEventListener("click", closeAlertModal);
+}
+if (elements.alertModal) {
+  elements.alertModal.addEventListener("click", (e) => {
+    if (e.target === elements.alertModal) closeAlertModal();
   });
 }
 
