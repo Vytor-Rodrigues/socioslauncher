@@ -434,6 +434,11 @@ function syncActionButtons() {
   elements.clearSelection.disabled = state.busy || !hasSelection;
   elements.playActions.classList.toggle("launch-only", canLaunch);
   elements.playActions.classList.toggle("install-only", hasSelection && canInstall);
+
+  const playBar = document.querySelector("#play-bar");
+  if (playBar) {
+    playBar.classList.toggle("hidden", !hasSelection);
+  }
 }
 
 function validateLocalUsername(value) {
@@ -1412,6 +1417,7 @@ function modsEditorVisible() {
   if (!state.selected?.id) return false;
   const loaderType = String(state.selected?.loaderType || state.selected?.type || "").toLowerCase();
   if (loaderType === "optifine" || loaderType === "forgeoptifine") return false;
+  const hasLoader = ["fabric", "forge", "neoforge", "quilt"].includes(loaderType);
   return (
     (
       state.activeTab === "modpacks" &&
@@ -1420,7 +1426,8 @@ function modsEditorVisible() {
     ) ||
     (
       state.activeTab === "versions" &&
-      Boolean(state.selected?.installed || state.selected?.local)
+      Boolean(state.selected?.installed || state.selected?.local) &&
+      (hasLoader || isDownloadedModpack(state.selected))
     )
   );
 }
@@ -3602,49 +3609,143 @@ function saveLastPlayedVersion(version) {
   }
 }
 
+function versionMetaLabel(v) {
+  const loaderLabel = v.loaderType
+    ? ` · ${v.loaderType.charAt(0).toUpperCase() + v.loaderType.slice(1)}`
+    : "";
+  return v.minecraftVersion ? `MC ${v.minecraftVersion}${loaderLabel}` : v.id;
+}
+
+function versionThumbSvg(size = 22) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>`;
+}
+
 function renderHomeTab() {
   if (!elements.homeRecentCard) return;
 
   const saved = getLastPlayedVersion();
-  const version = saved && state.versions.find((v) => v.id === saved.id);
+  const lastPlayed = saved && state.versions.find((v) => v.id === saved.id);
 
-  if (!version) {
+  // All locally installed versions sorted by most recent
+  const installed = state.versions
+    .filter((v) => v.installed || v.local)
+    .sort((a, b) => {
+      const ta = a.lastPlayed || a.installedAt || 0;
+      const tb = b.lastPlayed || b.installedAt || 0;
+      return tb - ta;
+    });
+
+  // --- Featured main card (last played) ---
+  if (!lastPlayed) {
     elements.homeRecentCard.innerHTML = `<p class="home-empty-hint">Nenhuma versão jogada ainda.<br>Selecione uma versão e clique em Jogar.</p>`;
-    return;
+    elements.homeRecentCard.classList.remove("clickable");
+    elements.homeRecentCard.onclick = null;
+  } else {
+    const imgHtml = lastPlayed.iconUrl
+      ? `<img src="${escapeHtml(lastPlayed.iconUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">`
+      : versionThumbSvg(28);
+
+    const bgStyle = lastPlayed.iconUrl
+      ? `style="background-image:url('${escapeHtml(lastPlayed.iconUrl)}');background-size:cover;background-position:center;"`
+      : '';
+
+    elements.homeRecentCard.innerHTML = `
+      ${lastPlayed.iconUrl ? `<div class="hero-card-bg" ${bgStyle}></div>` : ''}
+      <div class="home-recent-icon" style="background-image:none;">
+        ${imgHtml}
+      </div>
+      <div class="home-recent-info">
+        <strong>${escapeHtml(lastPlayed.name || lastPlayed.id)}</strong>
+        <small>${escapeHtml(versionMetaLabel(lastPlayed))}</small>
+      </div>
+      <button class="home-recent-play-btn" id="home-play-btn" type="button">Jogar agora</button>
+    `;
+
+    elements.homeRecentCard.classList.add("clickable");
+
+    const launchLastPlayed = () => {
+      state.selected = lastPlayed;
+      setActiveTab("versions");
+      renderSelected();
+      runAction("launch");
+    };
+
+    const playBtn = elements.homeRecentCard.querySelector("#home-play-btn");
+    if (playBtn) {
+      playBtn.onclick = (e) => { e.stopPropagation(); launchLastPlayed(); };
+    }
+    elements.homeRecentCard.onclick = launchLastPlayed;
   }
 
-  const loaderLabel = version.loaderType
-    ? ` · ${version.loaderType.charAt(0).toUpperCase() + version.loaderType.slice(1)}`
-    : "";
-  const metaLabel = version.minecraftVersion
-    ? `MC ${version.minecraftVersion}${loaderLabel}`
-    : version.id;
+  // --- Featured side cards (next 3 installed) ---
+  const sideVersions = installed.filter((v) => v.id !== lastPlayed?.id).slice(0, 3);
+  for (let i = 1; i <= 3; i++) {
+    const el = document.querySelector(`#featured-side-${i}`);
+    if (!el) continue;
+    const v = sideVersions[i - 1];
+    if (!v) {
+      el.innerHTML = "";
+      el.style.visibility = "hidden";
+      continue;
+    }
+    el.style.visibility = "";
+    const imgHtml = v.iconUrl
+      ? `<img src="${escapeHtml(v.iconUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">`
+      : versionThumbSvg(18);
 
-  elements.homeRecentCard.innerHTML = `
-    <div class="home-recent-icon">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
-    </div>
-    <div class="home-recent-info">
-      <strong>${version.name || version.id}</strong>
-      <small>${metaLabel}</small>
-    </div>
-    <button class="home-recent-play-btn" id="home-play-btn" type="button">Jogar agora</button>
-  `;
+    el.innerHTML = `
+      <div class="featured-side-card-icon">${imgHtml}</div>
+      <div class="featured-side-card-info">
+        <strong>${escapeHtml(v.name || v.id)}</strong>
+        <small>${escapeHtml(versionMetaLabel(v))}</small>
+      </div>
+    `;
+    el.onclick = () => {
+      state.selected = v;
+      setActiveTab("versions");
+      renderSelected();
+    };
+  }
 
-  elements.homeRecentCard.classList.add("clickable");
+  // --- Home versions grid (all installed) ---
+  const gridEl = document.querySelector("#home-versions-grid");
+  if (gridEl) {
+    if (!installed.length) {
+      gridEl.innerHTML = `<p class="home-empty-hint" style="grid-column:1/-1;padding:16px 0;">Nenhuma versão instalada ainda.</p>`;
+    } else {
+      gridEl.innerHTML = installed.map((v) => {
+        const imgHtml = v.iconUrl
+          ? `<img src="${escapeHtml(v.iconUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">`
+          : versionThumbSvg(28);
+        return `
+          <div class="home-grid-card" data-vid="${escapeHtml(v.id)}">
+            <div class="home-grid-card-thumb">${imgHtml}</div>
+            <div class="home-grid-card-body">
+              <span class="home-grid-card-name">${escapeHtml(v.name || v.id)}</span>
+              <span class="home-grid-card-meta">${escapeHtml(versionMetaLabel(v))}</span>
+            </div>
+          </div>
+        `;
+      }).join("");
 
-  const launchLastPlayed = () => {
-    state.selected = version;
-    setActiveTab("versions");
-    renderSelected();
-    runAction("launch");
-  };
+      gridEl.querySelectorAll(".home-grid-card").forEach((card) => {
+        card.addEventListener("click", () => {
+          const vid = card.dataset.vid;
+          const found = state.versions.find((v) => v.id === vid);
+          if (found) {
+            state.selected = found;
+            setActiveTab("versions");
+            renderSelected();
+          }
+        });
+      });
+    }
 
-  elements.homeRecentCard.querySelector("#home-play-btn").onclick = (e) => {
-    e.stopPropagation();
-    launchLastPlayed();
-  };
-  elements.homeRecentCard.onclick = launchLastPlayed;
+    const userEl = document.querySelector("#home-recent-user");
+    if (userEl && state.account) {
+      userEl.textContent = state.account.name || "você";
+    }
+  }
 }
 
 function setActiveTab(tab) {
@@ -3670,6 +3771,11 @@ function setActiveTab(tab) {
   }
   if (elements.homeSection) {
     elements.homeSection.classList.toggle("hidden", tab !== "home");
+  }
+
+  const mainTopbar = document.querySelector("#main-topbar");
+  if (mainTopbar) {
+    mainTopbar.classList.toggle("hidden", tab === "home");
   }
 
   if (tab === "home") {
@@ -4911,23 +5017,55 @@ elements.clearSelection.addEventListener("click", clearSelectedVersion);
 elements.openFolder.addEventListener("click", () => api.openMinecraftFolder());
 
 elements.accountView.addEventListener("click", () => {
-  if (elements.accountDropdown) {
-    const isHidden = elements.accountDropdown.classList.contains("hidden");
-    elements.accountDropdown.classList.toggle("hidden");
-    if (elements.accountChevron) {
-      elements.accountChevron.style.transform = isHidden ? "rotate(180deg)" : "rotate(0deg)";
-    }
+  state.skinEditorAccountId = null;
+  if (elements.accountsModal) {
+    elements.accountsModal.classList.remove("hidden");
+    elements.accountsModal.setAttribute("aria-hidden", "false");
+    renderAccountsModal();
   }
 });
 
 if (elements.manageAccountsBtn) {
   elements.manageAccountsBtn.addEventListener("click", () => {
-    elements.accountDropdown.classList.add("hidden");
+    if (elements.accountDropdown) elements.accountDropdown.classList.add("hidden");
     if (elements.accountChevron) elements.accountChevron.style.transform = "rotate(0deg)";
     state.skinEditorAccountId = null;
     elements.accountsModal.classList.remove("hidden");
     elements.accountsModal.setAttribute("aria-hidden", "false");
     renderAccountsModal();
+  });
+}
+
+// Settings modal
+const settingsModal = document.querySelector("#settings-modal");
+const btnSettings = document.querySelector("#btn-settings");
+const closeSettingsModal = document.querySelector("#close-settings-modal");
+const closeSettingsModalOk = document.querySelector("#close-settings-modal-ok");
+
+if (btnSettings && settingsModal) {
+  btnSettings.addEventListener("click", () => {
+    settingsModal.classList.remove("hidden");
+    settingsModal.setAttribute("aria-hidden", "false");
+  });
+}
+if (closeSettingsModal) {
+  closeSettingsModal.addEventListener("click", () => {
+    settingsModal.classList.add("hidden");
+    settingsModal.setAttribute("aria-hidden", "true");
+  });
+}
+if (closeSettingsModalOk) {
+  closeSettingsModalOk.addEventListener("click", () => {
+    settingsModal.classList.add("hidden");
+    settingsModal.setAttribute("aria-hidden", "true");
+  });
+}
+if (settingsModal) {
+  settingsModal.addEventListener("click", (e) => {
+    if (e.target === settingsModal) {
+      settingsModal.classList.add("hidden");
+      settingsModal.setAttribute("aria-hidden", "true");
+    }
   });
 }
 

@@ -3,7 +3,32 @@
     "allow": [
       "Bash(npm show *)",
       "Bash(npm install *)",
-      "Bash(npm audit *)"
+      "Bash(npm audit *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\" -Force)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(node -e ' *)",
+      "Bash(node -e \"const fs=require\\('fs'\\);const css=fs.readFileSync\\('src/renderer/styles.css','utf8'\\);console.log\\('CSS size:',css.length,'bytes'\\);const html=fs.readFileSync\\('src/renderer/index.html','utf8'\\);console.log\\('HTML size:',html.length,'bytes'\\);console.log\\('OK'\\)\")",
+      "Bash(node -e \"const fs=require\\('fs'\\);const css=fs.readFileSync\\('src/renderer/styles.css','utf8'\\);const issues=[];if\\(!css.includes\\('--r-xl'\\)\\)issues.push\\('missing --r-xl'\\);if\\(!css.includes\\('backdrop-filter'\\)\\)issues.push\\('missing backdrop-filter'\\);if\\(!css.includes\\('.play-bar'\\)\\)issues.push\\('missing .play-bar'\\);if\\(!css.includes\\('.featured-main-card'\\)\\)issues.push\\('missing .featured-main-card'\\);if\\(!css.includes\\('.hero-card-bg'\\)\\)issues.push\\('missing .hero-card-bg'\\);if\\(!css.includes\\('.home-grid-card'\\)\\)issues.push\\('missing .home-grid-card'\\);console.log\\(issues.length===0?'All checks passed':issues.join\\(', '\\)\\)\")",
+      "Bash(node -e \"const fs=require\\('fs'\\);const js=fs.readFileSync\\('src/renderer/renderer.js','utf8'\\);const i=js.indexOf\\('hero-card-bg'\\);console.log\\('hero-card-bg found at index:',i\\);console.log\\(js.substring\\(i-30,i+100\\)\\)\")",
+      "Bash(Get-ChildItem -Recurse -File)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(npm run *)",
+      "Bash(timeout 8 electron .)",
+      "Bash(node_modules/.bin/electron . --no-sandbox)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\" -Recurse -Force | Select-Object -Property FullName | ForEach-Object { $_.FullName.Replace\\(\"c:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\\\\\", \"\"\\).Replace\\(\"c:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\", \".\"\\) } | Sort-Object)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\" -Directory)",
+      "Bash(Select-Object Name)",
+      "PowerShell($dirs = Get-ChildItem -Path \"c:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\" -Directory | Select-Object -ExpandProperty Name; $dirs | ForEach-Object { \"└── $_\" })",
+      "Bash(xargs grep -l \"exit status 2\\\\|exitCode\\\\|spawnSync\\\\|execFile\\\\|Cannot create symbolic\")",
+      "Bash(xargs grep -l \"winCodeSign\\\\|snld\\\\|Cannot create symbolic\")",
+      "Bash(xargs grep -l \"snld\\\\|-snld\\\\|7z.*extract\\\\|extractFile\\\\|downloadTool\\\\|DownloadTool\")",
+      "Bash(xargs grep -l \"exit status 2\\\\|exitCode.*2\\\\|code.*2.*error\\\\|sub items errors\")",
+      "Bash(grep -rn \"winCodeSign\\\\s*=\" \"c:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\\\\node_modules\\\\app-builder-lib\\\\out\\\\\" --include=\"*.js\" | grep -v \"wincodesignChecksums\\\\|winCodeSign ==\" | head -30)",
+      "Read(//c/Users/vytor.rodrigues/Documents/client/socioslauncher/**)",
+      "PowerShell(cd \"c:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\"; $env:CSC_IDENTITY_AUTO_DISCOVERY = \"false\"; npm run dist 2>&1)",
+      "Bash(node -e \"const pkg = require\\('./package.json'\\); console.log\\(JSON.stringify\\(pkg.build.toolsets, null, 2\\)\\);\")",
+      "Bash(node -e \"const {appBuilderPath} = require\\('app-builder-bin'\\); console.log\\(appBuilderPath\\);\")",
+      "Bash(\"C:\\\\Users\\\\vytor.rodrigues\\\\Documents\\\\client\\\\socioslauncher\\\\node_modules\\\\app-builder-bin\\\\win\\\\x64\\\\app-builder.exe\" download-artifact *)"
     ]
   }
 }
